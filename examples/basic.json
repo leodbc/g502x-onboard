@@ -1,0 +1,70 @@
+{
+  "format": 1,
+  "profiles": {
+    "2": {
+      "settings": {
+        "name": "WORK",
+        "polling_rate_hz": 1000,
+        "dpi": [
+          800,
+          1600,
+          3200
+        ],
+        "default_dpi": 1600,
+        "shift_dpi": 800
+      },
+      "buttons": {
+        "G4": "copy",
+        "G5": "paste",
+        "G7": {
+          "action": "text",
+          "value": "hello world"
+        },
+        "G8": "volume_up"
+      },
+      "g_shift_button": "G6",
+      "g_shift": {
+        "G4": {
+          "action": "sequence",
+          "steps": [
+            {
+              "action": "consumer",
+              "command": "volume_up"
+            },
+            {
+              "action": "delay",
+              "ms": 120
+            },
+            {
+              "action": "consumer",
+              "command": "volume_down"
+            }
+          ]
+        }
+      }
+    },
+    "3": {
+      "settings": {
+        "name": "BROWSE",
+        "polling_rate_hz": 500,
+        "dpi": [
+          600,
+          1200,
+          2400
+        ],
+        "default_dpi": 1200,
+        "shift_dpi": 600
+      },
+      "buttons": {
+        "G4": {
+          "action": "mouse",
+          "command": "back"
+        },
+        "G5": {
+          "action": "mouse",
+          "command": "forward"
+        }
+      }
+    }
+  }
+}

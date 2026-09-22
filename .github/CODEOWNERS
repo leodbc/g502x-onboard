@@ -1,0 +1,11 @@
+# Safety-critical surfaces
+/g502x_onboard/device.py @leodbc
+/g502x_onboard/baseline.py @leodbc
+/g502x_onboard/private_io.py @leodbc
+/SECURITY.md @leodbc
+/.github/workflows/ @leodbc
+/requirements.txt @leodbc
+/tools/release_metadata.py @leodbc
+/tools/build_release.py @leodbc
+/tools/verify_release.py @leodbc
+/.github/dependabot.yml @leodbc

@@ -1,0 +1,71 @@
+{
+  "format": 1,
+  "profiles": {
+    "2": {
+      "settings": {
+        "name": "HW SMOKE P2",
+        "polling_rate_hz": 1000,
+        "dpi": [
+          400,
+          800,
+          1600,
+          3200
+        ],
+        "default_dpi": 1600,
+        "shift_dpi": 400
+      },
+      "buttons": {
+        "G4": {
+          "action": "text",
+          "value": "abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz0123456789 hw"
+        },
+        "G5": "volume_up"
+      },
+      "g_shift_button": "G6",
+      "g_shift": {
+        "G4": "copy",
+        "G5": {
+          "action": "sequence",
+          "steps": [
+            {
+              "action": "consumer",
+              "command": "volume_up"
+            },
+            {
+              "action": "delay",
+              "ms": 120
+            },
+            {
+              "action": "consumer",
+              "command": "volume_down"
+            }
+          ]
+        }
+      }
+    },
+    "3": {
+      "settings": {
+        "name": "HW SMOKE P3",
+        "polling_rate_hz": 500,
+        "dpi": [
+          500,
+          1000,
+          2000,
+          4000
+        ],
+        "default_dpi": 1000,
+        "shift_dpi": 500
+      },
+      "buttons": {
+        "G4": {
+          "action": "text",
+          "value": "abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz0123456789 hw"
+        },
+        "G5": {
+          "action": "mouse",
+          "command": "back"
+        }
+      }
+    }
+  }
+}

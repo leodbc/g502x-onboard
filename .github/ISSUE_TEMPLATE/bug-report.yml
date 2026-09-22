@@ -1,0 +1,72 @@
+name: Bug or safety report
+description: Report a reproducible failure in planning, validation, read-only setup, or a controlled write path.
+title: "[bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep reports reproducible and sanitized. Prefer `report probe` / `report device` over raw diagnostics. Run
+        `python g502x.py report check <report.json>` before attaching a hardware report.
+  - type: input
+    id: version
+    attributes:
+      label: Tool version and commit
+      placeholder: 0.1.0 @ <commit>
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      placeholder: python g502x.py validate
+    validations:
+      required: true
+  - type: dropdown
+    id: operation
+    attributes:
+      label: Operation class
+      options:
+        - Offline compile / plan / selftest
+        - Read-only probe / report
+        - Setup / baseline management
+        - Validate / inspect / status
+        - Apply / restore / baseline restore
+        - Profile switch
+        - Packaging / install / CI
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Steps from a clean state. Do not include private identifiers or raw user data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Paste sanitized error/output only.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Optional privacy-minimized hardware report
+      description: Attach a JSON created by `report probe` or `report device` when hardware context matters.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I did not bypass recovery, identity, transport, or G HUB interlocks to reproduce this.
+          required: true
+        - label: I removed unit IDs, serials, private fingerprints, raw sectors, and personal macro contents from this public report.
+          required: true

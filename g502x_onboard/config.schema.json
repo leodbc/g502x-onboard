@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/leodbc/g502x-onboard/blob/main/g502x_onboard/config.schema.json",
+  "title": "G502 X Onboard configuration format 1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "const": 1
+    },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[2-5]$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      },
+      "required": [
+        "2"
+      ]
+    }
+  },
+  "required": [
+    "format",
+    "profiles"
+  ],
+  "$defs": {
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "polling_rate_hz": {
+          "enum": [
+            1000,
+            500,
+            250,
+            125
+          ]
+        },
+        "dpi": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        },
+        "default_dpi": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "shift_dpi": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "settings": {
+          "$ref": "#/$defs/settings"
+        },
+        "buttons": {
+          "$ref": "#/$defs/layer"
+        },
+        "g_shift_button": {
+          "enum": [
+            "G1",
+            "G2",
+            "G3",
+            "G4",
+            "G5",
+            "G6",
+            "G7",
+            "G8",
+            "G9",
+            "TILT_LEFT",
+            "TILT_RIGHT"
+          ]
+        },
+        "g_shift": {
+          "$ref": "#/$defs/layer"
+        }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "G1",
+          "G2",
+          "G3",
+          "G4",
+          "G5",
+          "G6",
+          "G7",
+          "G8",
+          "G9",
+          "TILT_LEFT",
+          "TILT_RIGHT",
+          "WHEEL_DOWN",
+          "WHEEL_UP"
+        ]
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "$ref": "#/$defs/action"
+          }
+        ]
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "hotkey",
+            "tap",
+            "text",
+            "delay",
+            "consumer",
+            "mouse",
+            "wheel",
+            "horizontal_wheel",
+            "wait_for_release",
+            "repeat_while_pressed",
+            "sequence"
+          ]
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "layout": {
+          "enum": [
+            "basic",
+            "us"
+          ]
+        },
+        "ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "command": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "integer",
+          "minimum": -127,
+          "maximum": 127
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/action"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

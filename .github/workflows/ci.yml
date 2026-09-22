@@ -1,0 +1,113 @@
+name: offline-ci
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            architecture: x64
+            pointer_bits: 64
+            lane: linux-x64
+          - os: windows-latest
+            architecture: x64
+            pointer_bits: 64
+            lane: windows-x64
+          - os: windows-latest
+            architecture: x86
+            pointer_bits: 32
+            lane: windows-x86
+    name: ${{ matrix.lane }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.architecture }}
+      - name: Native hidapi runtime (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libhidapi-hidraw0
+      - name: Install hash-locked Python dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Verify interpreter architecture
+        run: >-
+          python -c "import struct; actual=struct.calcsize('P')*8; expected=int('${{ matrix.pointer_bits }}'); assert actual == expected, (actual, expected); print(f'Python pointer width: {actual}-bit')"
+      - name: Syntax and offline tests
+        run: |
+          python -m py_compile g502x.py g502x_onboard/__init__.py g502x_onboard/baseline.py g502x_onboard/constants.py g502x_onboard/config.py g502x_onboard/codec.py g502x_onboard/storage.py g502x_onboard/private_io.py g502x_onboard/device.py g502x_onboard/validator.py g502x_onboard/cli.py tools/release_smoke.py tools/release_metadata.py tools/build_release.py tools/verify_release.py
+          python -m json.tool g502x_onboard/config.schema.json
+          python -m json.tool examples/basic.json
+          python -m json.tool tests/fixtures/hardware-smoke.json
+          python -m unittest discover -s tests -p "test_*.py" -v
+          python g502x.py selftest
+          python g502x.py --version
+          python g502x.py capabilities --json
+          python tools/release_smoke.py --help
+
+      - name: Build public release metadata/archive
+        run: |
+          python tools/build_release.py --out dist/ci-release
+          python -m json.tool dist/ci-release/SBOM.spdx.json
+          python -m json.tool dist/ci-release/RELEASE_MANIFEST.json
+          python tools/verify_release.py dist/ci-release
+          python tools/verify_release.py dist/ci-release.zip
+
+      - name: Record deterministic archive digest
+        run: >-
+          python -c "import hashlib,pathlib; p=pathlib.Path(r'dist/ci-release.zip'); pathlib.Path(r'dist/repro-${{ matrix.lane }}.sha256').write_bytes((hashlib.sha256(p.read_bytes()).hexdigest()+'\n').encode('ascii'))"
+
+      - name: Upload archive digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-hash-${{ matrix.lane }}
+          path: dist/repro-${{ matrix.lane }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+
+  reproducibility:
+    name: cross-platform-release-reproducibility
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download lane digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-hash-*
+          path: hashes
+          merge-multiple: true
+
+      - name: Require one identical SHA-256 across all lanes
+        run: |
+          count="$(find hashes -type f -name '*.sha256' | wc -l)"
+          test "$count" -eq 3
+          unique="$(cat hashes/*.sha256 | sort -u | wc -l)"
+          if [ "$unique" -ne 1 ]; then
+            echo "Release archive differs across CI lanes:"
+            for file in hashes/*.sha256; do
+              echo "$(basename "$file"): $(cat "$file")"
+            done
+            exit 1
+          fi
+          echo "Cross-platform deterministic archive: $(head -n 1 hashes/*.sha256)"

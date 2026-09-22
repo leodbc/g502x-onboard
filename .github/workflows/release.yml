@@ -1,0 +1,98 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Native hidapi runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libhidapi-hidraw0
+
+      - name: Install hash-locked dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Offline release gate
+        run: |
+          python -m unittest discover -s tests -p "test_*.py" -v
+          python g502x.py selftest
+
+      - name: Resolve release name
+        run: |
+          VERSION="$(python -c 'from g502x_onboard import __version__; print(__version__)')"
+          echo "RELEASE_NAME=g502x-onboard-$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build deterministic release
+        run: |
+          python tools/build_release.py --expected-tag "$GITHUB_REF_NAME"
+          (cd dist && sha256sum -c "$RELEASE_NAME.zip.sha256")
+
+      - name: Verify release metadata before attestation
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("dist") / os.environ["RELEASE_NAME"]
+          manifest = json.loads((root / "RELEASE_MANIFEST.json").read_text())
+          sbom_path = root / "SBOM.spdx.json"
+          sbom = json.loads(sbom_path.read_text())
+
+          assert manifest["source_commit"] == os.environ["GITHUB_SHA"]
+          assert manifest["python_requirements"]["hash_checking"] is True
+          assert manifest["sbom"]["format"] == "SPDX-2.3"
+          actual_sbom = hashlib.sha256(sbom_path.read_bytes()).hexdigest()
+          assert manifest["sbom"]["sha256"] == actual_sbom
+          assert sbom["spdxVersion"] == "SPDX-2.3"
+          assert sbom["documentNamespace"].endswith(os.environ["GITHUB_SHA"])
+          print("release metadata pre-attestation gate: PASS")
+          PY
+
+      - name: Attest build provenance
+        if: ${{ github.event.repository.private == false }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/${{ env.RELEASE_NAME }}.zip
+
+      - name: Attest SPDX SBOM
+        if: ${{ github.event.repository.private == false }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/${{ env.RELEASE_NAME }}.zip
+          sbom-path: dist/${{ env.RELEASE_NAME }}/SBOM.spdx.json
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/$RELEASE_NAME.zip" \
+            "dist/$RELEASE_NAME.zip.sha256" \
+            "dist/$RELEASE_NAME/SBOM.spdx.json" \
+            "dist/$RELEASE_NAME/RELEASE_MANIFEST.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "G502 X Onboard $GITHUB_REF_NAME" \
+            --notes "First public release of G502 X Onboard. Persistent-write support is intentionally limited to the hardware/firmware scope documented in SUPPORTED_DEVICES.md; start with the read-only probe and setup workflow." \
+            --generate-notes
