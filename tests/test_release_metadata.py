@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -13,6 +15,7 @@ if str(ROOT) not in sys.path:
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
+from build_release import deterministic_zip
 from release_metadata import build_spdx, parse_requirements_lock
 from libs.utils import WINDOWS_HIDAPI_SHA256
 
@@ -93,9 +96,29 @@ class ReleaseMetadataLockTests(unittest.TestCase):
         )
 
 
-    def test_spdx_identifies_vendored_hidapi_0150(self):
-        import tempfile
+    def test_zip_order_uses_canonical_posix_relative_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "release"
+            (root / "docs").mkdir(parents=True)
+            (root / "libs").mkdir()
+            (root / "README.md").write_bytes(b"readme")
+            (root / "docs" / "a.txt").write_bytes(b"docs")
+            (root / "libs" / "z.txt").write_bytes(b"libs")
+            archive = Path(td) / "release.zip"
 
+            deterministic_zip(root, archive)
+
+            with zipfile.ZipFile(archive, "r") as zf:
+                self.assertEqual(
+                    zf.namelist(),
+                    [
+                        "release/README.md",
+                        "release/docs/a.txt",
+                        "release/libs/z.txt",
+                    ],
+                )
+
+    def test_spdx_identifies_vendored_hidapi_0150(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             x64 = root / "x64.dll"

@@ -90,10 +90,12 @@ def assert_canonical_generated_newlines(root: Path) -> None:
 def deterministic_zip(root: Path, archive: Path) -> None:
     if archive.exists():
         archive.unlink()
+    files = sorted(
+        (path for path in root.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
-        for path in sorted(root.rglob("*")):
-            if not path.is_file():
-                continue
+        for path in files:
             arcname = (Path(root.name) / path.relative_to(root)).as_posix()
             info = zipfile.ZipInfo(
                 filename=arcname,
