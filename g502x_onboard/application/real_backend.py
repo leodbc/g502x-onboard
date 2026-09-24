@@ -18,13 +18,38 @@ OPERATION_LOCK = STATE_HOME / "operation.lock"
 
 
 def _compatibility(raw: dict) -> CompatibilityObservation:
-    write_allowed = raw.get("write_allowed") is True
+    architecture = str(raw.get("architecture", "unknown"))
+    transport = str(raw.get("transport", "unknown"))
+    identity = str(raw.get("identity", "unknown"))
+    if identity not in {"unit-bound", "insufficient"}:
+        # Adapter-facing compatibility is shareable. Never forward a future
+        # raw/unit-specific identity value through this field.
+        identity = "unknown"
+
+    write_allowed = (
+        raw.get("write_allowed") is True
+        and architecture == "compatible"
+        and transport == "tested"
+        and identity == "unit-bound"
+    )
     return CompatibilityObservation(
-        architecture=str(raw.get("architecture", "unknown")),
-        transport=str(raw.get("transport", "unknown")),
-        identity=str(raw.get("identity", "unknown")),
+        architecture=architecture,
+        transport=transport,
+        identity=identity,
         write_allowed=write_allowed,
         eligibility=(WriteEligibility.ELIGIBLE if write_allowed else WriteEligibility.READ_ONLY),
+    )
+
+
+def _read_only(observed: CompatibilityObservation) -> CompatibilityObservation:
+    if observed.eligibility is WriteEligibility.READ_ONLY:
+        return observed
+    return CompatibilityObservation(
+        architecture=observed.architecture,
+        transport=observed.transport,
+        identity=observed.identity,
+        write_allowed=False,
+        eligibility=WriteEligibility.READ_ONLY,
     )
 
 
@@ -98,31 +123,61 @@ class RealBackend:
 
     def preparation_context(self) -> PreparationContext:
         from ..device import (
-            assert_active_device_matches_baseline,
             connect_manifest_unit,
             get_current_profile,
+            probe_device,
             require_ghub_closed,
         )
         from ..validator import validate_device
 
         with exclusive_operation_lock(OPERATION_LOCK):
             require_ghub_closed()
-            manifest = assert_active_device_matches_baseline()
             baseline_images, baseline_manifest = active_baseline()
+            pid, index = active_target()
+
+            # Preparation must be able to return a typed READ_ONLY refusal for
+            # a currently unsupported or mismatched target. Probe first using
+            # the existing read-only authority instead of requiring write
+            # authority merely to observe preparation preconditions.
+            probe = probe_device(pid=pid, index=index, read_sectors=False)
+            compatibility = _compatibility(probe.get("compatibility") or {})
+
+            baseline_binding = str(baseline_manifest.get("fingerprint") or "")
+            exact_unit_binding = str(probe.get("fingerprint") or "")
+            if not baseline_binding or not exact_unit_binding:
+                raise RuntimeError("preparation is missing its exact-unit binding")
+
+            if exact_unit_binding != baseline_binding:
+                compatibility = _read_only(compatibility)
+
+            active_profile = probe.get("active_profile")
+            if compatibility.eligibility is WriteEligibility.READ_ONLY:
+                return PreparationContext(
+                    baseline_images=tuple(sorted(baseline_images.items())),
+                    active_baseline_binding=baseline_binding,
+                    exact_unit_binding=exact_unit_binding,
+                    compatibility=compatibility,
+                    active_profile=active_profile,
+                    validation_ok=False,
+                    host_guard_clear=True,
+                    observed_preconditions=(
+                        f"active_profile={active_profile}",
+                        "validation_ok=false",
+                    ),
+                )
+
+            # Eligible preparations preserve the current exact-unit and
+            # validation authority. These calls are read-only and remain under
+            # the same cross-process operation lock.
             images, report = validate_device()
             del images
 
+            manifest = baseline_manifest
             dev = connect_manifest_unit(manifest)
             try:
                 active_profile = get_current_profile(dev)
             finally:
                 dev.close()
-
-            compatibility = _compatibility(manifest.get("compatibility") or {})
-            baseline_binding = str(baseline_manifest.get("fingerprint") or "")
-            exact_unit_binding = str(manifest.get("fingerprint") or "")
-            if not baseline_binding or not exact_unit_binding:
-                raise RuntimeError("active baseline is missing its exact-unit binding")
 
             return PreparationContext(
                 baseline_images=tuple(sorted(baseline_images.items())),
