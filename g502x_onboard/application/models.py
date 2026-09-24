@@ -51,10 +51,22 @@ class OperationResult(Generic[T]):
     privacy: PrivacyClass = PrivacyClass.SHAREABLE
 
     def __post_init__(self) -> None:
-        if self.ok == (self.error is not None):
-            raise ValueError("successful results cannot contain an error and failures must contain one")
-        if self.ok and self.value is None:
-            raise ValueError("successful results require a typed value")
+        if self.ok:
+            if self.error is not None:
+                raise ValueError("successful results cannot contain an error")
+            if self.value is None:
+                raise ValueError("successful results require a typed value")
+            value_privacy = getattr(self.value, "privacy", None)
+            if value_privacy is not None and value_privacy != self.privacy:
+                raise ValueError("result privacy must match typed value privacy")
+            return
+
+        if self.error is None:
+            raise ValueError("failed results require a typed error")
+        if self.value is not None:
+            raise ValueError("failed results cannot carry a stale value")
+        if self.error.privacy != self.privacy:
+            raise ValueError("result privacy must match error privacy")
 
 
 @dataclass(frozen=True)
@@ -64,6 +76,11 @@ class CompatibilityObservation:
     identity: str
     write_allowed: bool
     eligibility: WriteEligibility
+
+    def __post_init__(self) -> None:
+        expected = self.eligibility is WriteEligibility.ELIGIBLE
+        if self.write_allowed != expected:
+            raise ValueError("write_allowed and eligibility must describe the same policy")
 
 
 @dataclass(frozen=True)
