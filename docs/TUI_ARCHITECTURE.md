@@ -141,7 +141,7 @@ When `NO_COLOR` is present, semantic information cannot depend on color. Color s
 
 ## Error and progress model
 
-Application operations return typed outcomes with a stable operation id and phase. The TUI may render progress, but progress is descriptive rather than authoritative.
+Application operations return typed outcomes with a stable operation id and phase. The TUI may render progress, but progress is descriptive rather than authoritative. The UI must not invent synthetic percentages. A percentage may be shown only when the application supplies deterministic completed/total work units that truthfully support that calculation; otherwise progress is expressed as a named phase, activity, elapsed time, or concrete completed-work count without a percentage.
 
 Persistent mutation phases are defined in `TUI_SAFETY_MODEL.md`. Any error after write start must be presented as an operation result requiring reconciliation/validation context; the TUI must never convert an ambiguous transport exception into "not written" on its own.
 

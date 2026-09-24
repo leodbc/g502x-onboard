@@ -114,6 +114,8 @@ Cover:
 - invalidation returns the user to a new-prepare path rather than preserving confirmation;
 - local-sensitive and private-diagnostic classifications survive every state transition;
 - errors do not silently drop an active non-cancellable transaction;
+- error events/results retain their privacy classification and raw exception text is never rendered through an unclassified/default-shareable path;
+- progress views do not fabricate percentages: without application-supplied deterministic completed/total units they show phase/activity/concrete counts only; any displayed percentage is proven from those units;
 - view models contain explicit labels for read-only state, privacy class, and non-cancellable write phase.
 
 Snapshots may test rendering, but safety assertions must be structural and semantic rather than pixel/color dependent.
@@ -152,6 +154,8 @@ Verify:
 - local-sensitive review data can be shown for the explicit local workflow without exposing device identity/raw baseline state;
 - private diagnostic surfaces are visibly labeled before data is revealed;
 - local-sensitive/private payloads are never placed in operation ids, worker names, exception titles, telemetry, or default shareable logs;
+- error payloads containing local paths/profile or macro names/backup labels remain local-sensitive, while per-unit identifiers/raw state remain private-diagnostic; sanitized privacy-safe error summaries omit those values;
+- raw exception strings cannot bypass typed privacy classification into a default/shareable error or log surface;
 - switching from local-sensitive or private-diagnostic views to shareable views clears sensitive content rather than merely hiding the widget.
 
 ### 9. Keyboard-first and 80x24 tests
@@ -179,7 +183,7 @@ For the same FakeBackend state and operation inputs, compare normalized applicat
 
 Parity must cover at least plan/apply, validate/status, profile selection, restore, baseline restore, and privacy-safe report generation. Adapter formatting may differ; operation intent, gates, write order, reconciliation, and result classification may not.
 
-Existing CLI confirmation phrases and behavior remain regression-tested.
+Existing CLI confirmation phrases and behavior remain regression-tested. Regression fixtures must assert the exact current phrases `APPLY CONFIG`, `RESTORE BACKUP`, `RESTORE BASELINE`, `ENTER PROFILE N`, and `BACK TO SAFE` rather than only checking that some confirmation occurred.
 
 ### 12. Failure/reconciliation matrix
 

@@ -72,6 +72,16 @@ The TUI cannot infer review from elapsed time, focus, scrolling, or opening a sc
 
 Persistent destructive operations require an exact typed phrase. The phrase is supplied by the application contract and must preserve the semantic strength of the current CLI confirmation for the corresponding operation.
 
+The current confirmation contract that the shared application/adapters must preserve is:
+
+- apply: `APPLY CONFIG`;
+- backup restore: `RESTORE BACKUP`;
+- baseline restore: `RESTORE BASELINE`;
+- enter programmable profile N: `ENTER PROFILE N`;
+- return to the recovery profile: `BACK TO SAFE`.
+
+Profile selection is a volatile mutation rather than a `PreparedOperation`, but its current typed confirmation remains mandatory. The TUI must not downgrade any of these phrases to a generic yes/no action.
+
 Copy/paste may be permitted, but the text must match exactly after only the same normalization already accepted by the CLI (currently surrounding whitespace trimming). The TUI must not offer a one-click substitute, checkbox-only confirmation, force flag, or "remember my choice" option.
 
 Confirmation does not authorize a stale prepared operation. It only requests execution-time revalidation.
@@ -209,6 +219,8 @@ Private diagnostic surfaces must:
 - require explicit opt-in for raw/private detail, preserving current CLI semantics.
 
 The classification is part of typed application data so a widget cannot accidentally present local-sensitive or private-diagnostic data as shareable.
+
+Errors are typed outputs under the same privacy model. Error detail may contain local-sensitive or private-diagnostic material only when it carries that classification and is rendered solely in the corresponding local/private surface. Default/privacy-safe error summaries and default shareable logs must be sanitized; raw exception strings must never be implicitly promoted to privacy-safe/shareable output or reused as operation ids, worker names, crash titles, or telemetry fields.
 
 ## Host guards and read-only presentation
 
