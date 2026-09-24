@@ -487,7 +487,7 @@ class RealBackendPersistentParityTests(unittest.TestCase):
         self.baseline = fake_baseline()
         self.manifest = {"fingerprint": "fixture"}
         self.config = Path(self.temp.name) / "config.json"
-        config = {
+        raw_config = {
             "format": 1,
             "profiles": {
                 "2": {
@@ -496,9 +496,11 @@ class RealBackendPersistentParityTests(unittest.TestCase):
                 }
             },
         }
-        self.config.write_text(json.dumps(config), encoding="utf-8")
+        self.config.write_text(json.dumps(raw_config), encoding="utf-8")
         from g502x_onboard.codec import build_plan, plan_json
+        from g502x_onboard.config import validate_config
 
+        config = validate_config(raw_config)
         self.plan = build_plan(config, self.baseline)
         self.plan_digest = hashlib.sha256(
             plan_json(self.plan).encode("utf-8")
