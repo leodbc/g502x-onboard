@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -792,6 +793,16 @@ def load_backup(path: str | Path) -> tuple[Path, dict[int, bytes], dict[str, Any
 
     return root, images, manifest
 
+
+def _programmable_target_digest(images: dict[int, bytes]) -> str:
+    """Deterministic digest of only the managed programmable target."""
+    digest = hashlib.sha256()
+    for sector in PROGRAMMABLE_SECTORS:
+        digest.update(int(sector).to_bytes(2, "big"))
+        digest.update(images[sector])
+    return digest.hexdigest()
+
+
 def _fresh_read_sector(
     sector: int,
     manifest: dict[str, Any],
@@ -892,6 +903,8 @@ def apply_plan(
     plan: dict[str, Any],
     *,
     expected_baseline_fingerprint: str | None = None,
+    before_first_write: Callable[[], None] | None = None,
+    before_final_reconcile: Callable[[], None] | None = None,
 ) -> Path:
     require_ghub_closed()
     require_baseline()
@@ -918,6 +931,8 @@ def apply_plan(
     baseline = baseline_map()
 
     staging = build_directory(baseline[0], {1, 2})
+    if before_first_write is not None:
+        before_first_write()
     fresh_write_sector(0, staging, label="Sector 0 staging", manifest=manifest)
     _validate_recovery_fresh(manifest)
 
@@ -942,6 +957,8 @@ def apply_plan(
     fresh_write_sector(0, plan["directory"], label="Sector 0 final directory", manifest=manifest)
     _validate_recovery_fresh(manifest)
 
+    if before_final_reconcile is not None:
+        before_final_reconcile()
     final = read_all(manifest=manifest)
     if final[0] != plan["directory"]:
         raise RuntimeError("final Sector 0 differs from plan")
@@ -955,10 +972,24 @@ def apply_plan(
     return backup
 
 
-def restore_backup(path: str | Path) -> Path:
+def restore_backup(
+    path: str | Path,
+    *,
+    expected_baseline_fingerprint: str | None = None,
+    expected_target_digest: str | None = None,
+    before_first_write: Callable[[], None] | None = None,
+    before_final_reconcile: Callable[[], None] | None = None,
+) -> Path:
     require_ghub_closed()
     require_baseline()
     manifest = assert_active_device_matches_baseline()
+    if expected_baseline_fingerprint is not None:
+        require_manifest_fingerprint(
+            manifest,
+            key="fingerprint",
+            expected=expected_baseline_fingerprint,
+            context="backup restore baseline",
+        )
     root, target, _manifest = load_backup(path)
 
     from .validator import validate_images
@@ -978,6 +1009,13 @@ def restore_backup(path: str | Path) -> Path:
                 "restore writes programmable state only"
             )
     validate_directory(target[0], baseline[0])
+    if (
+        expected_target_digest is not None
+        and _programmable_target_digest(target) != expected_target_digest
+    ):
+        raise RuntimeError(
+            "backup target changed after review; refusing before persistent write"
+        )
 
     current = read_all(manifest=manifest)
     validate_recovery_images(current)
@@ -986,6 +1024,8 @@ def restore_backup(path: str | Path) -> Path:
     safety_backup = create_backup("pre-restore", manifest)
 
     staging = build_directory(baseline[0], {1, 2})
+    if before_first_write is not None:
+        before_first_write()
     fresh_write_sector(
         0,
         staging,
@@ -1015,6 +1055,8 @@ def restore_backup(path: str | Path) -> Path:
     fresh_write_sector(0, target[0], label="Restore Sector 0", manifest=manifest)
     _validate_recovery_fresh(manifest)
 
+    if before_final_reconcile is not None:
+        before_final_reconcile()
     final = read_all(manifest=manifest)
     bad = [
         sector
@@ -1027,18 +1069,40 @@ def restore_backup(path: str | Path) -> Path:
     return safety_backup
 
 
-def restore_baseline() -> Path:
+def restore_baseline(
+    *,
+    expected_baseline_fingerprint: str | None = None,
+    expected_target_digest: str | None = None,
+    before_first_write: Callable[[], None] | None = None,
+    before_final_reconcile: Callable[[], None] | None = None,
+) -> Path:
     require_ghub_closed()
     require_baseline()
     manifest = assert_active_device_matches_baseline()
+    if expected_baseline_fingerprint is not None:
+        require_manifest_fingerprint(
+            manifest,
+            key="fingerprint",
+            expected=expected_baseline_fingerprint,
+            context="baseline restore baseline",
+        )
     ensure_safe_profile(manifest)
     current = read_all(manifest=manifest)
     validate_recovery_images(current)
 
     safety_backup = create_backup("pre-baseline-restore", manifest)
     target = baseline_map()
+    if (
+        expected_target_digest is not None
+        and _programmable_target_digest(target) != expected_target_digest
+    ):
+        raise RuntimeError(
+            "baseline target changed after review; refusing before persistent write"
+        )
 
     staging = build_directory(target[0], {1, 2})
+    if before_first_write is not None:
+        before_first_write()
     fresh_write_sector(0, staging, label="Baseline Sector 0 staging", manifest=manifest)
     _validate_recovery_fresh(manifest)
 
@@ -1063,6 +1127,8 @@ def restore_baseline() -> Path:
     fresh_write_sector(0, target[0], label="Baseline Sector 0", manifest=manifest)
     _validate_recovery_fresh(manifest)
 
+    if before_final_reconcile is not None:
+        before_final_reconcile()
     final = read_all(manifest=manifest)
     bad = [
         sector
