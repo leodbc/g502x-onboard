@@ -30,6 +30,7 @@ from g502x_onboard.application.backend import (
 from g502x_onboard.application.facade import ApplicationFacade
 from g502x_onboard.application.fake_backend import FakeBackend
 from g502x_onboard.codec import crc16_ccitt
+from g502x_onboard.config import ConfigError
 from g502x_onboard.constants import (
     GLOBAL_MACRO_SECTORS,
     PROGRAMMABLE_PROFILES,
@@ -101,6 +102,21 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
         self.assertTrue(prepared.ok, prepared.error)
         return backend, app, prepared.value
 
+    def test_prepare_apply_preserves_config_error_contract(self):
+        bad = Path(self.temp.name) / "bad-config.json"
+        bad.write_text('{"profiles": {}}', encoding="utf-8")
+        backend = FakeBackend(fake_baseline())
+        app = app_for(backend)
+        result = app.prepare_apply(bad)
+        self.assertFalse(result.ok)
+        self.assertIs(result.error.code, ErrorCode.CONFIG_ERROR)
+        self.assertEqual(backend.persistent_write_count, 0)
+
+        from g502x_onboard.cli import _app_value
+
+        with self.assertRaises(ConfigError):
+            _app_value(result)
+
     def test_prepare_contains_no_private_identity_or_raw_target(self):
         backend, _app, prepared = self.prepare_apply()
         self.assertIs(prepared.privacy, PrivacyClass.LOCAL_SENSITIVE)
@@ -156,11 +172,12 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
         backend, app, prepared = self.prepare_apply()
         first = app.execute_prepared(prepared, "APPLY CONFIG")
         self.assertTrue(first.value.success)
-        writes = backend.persistent_write_count
+        self.assertGreater(backend.persistent_write_count, 0)
+        backend.persistent_write_count = 0
         second = app.execute_prepared(prepared, "APPLY CONFIG")
         self.assertFalse(second.value.success)
         self.assertIs(second.value.error_code, ErrorCode.CONSUMED_PREPARATION)
-        self.assertEqual(backend.persistent_write_count, writes)
+        self.assertEqual(backend.persistent_write_count, 0)
 
     def test_zero_write_revalidation_refusal_matrix(self):
         cases = (
@@ -173,6 +190,7 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
             {"persistent_policy_authorized": False},
             {"host_guard_recheck_clear": False},
             {"recovery_ok": False},
+            {"active_profile": 2},
         )
         for state in cases:
             with self.subTest(state=state):
@@ -294,6 +312,41 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
         self.assertEqual(backend.persistent_write_count, 0)
         self.assertIn(PersistentPhase.ARMED, result.value.phase_trace)
         self.assertNotIn(PersistentPhase.WRITING, result.value.phase_trace)
+        retry = app.execute_prepared(prepared, "APPLY CONFIG")
+        self.assertFalse(retry.value.success)
+        self.assertIs(
+            retry.value.error_code,
+            ErrorCode.CONSUMED_PREPARATION,
+        )
+        self.assertEqual(backend.persistent_write_count, 0)
+
+    def test_cancellation_during_backend_revalidation_checkpoint_writes_zero(self):
+        backend, app, prepared = self.prepare_apply()
+        token = CancellationToken()
+        entered = Event()
+        release = Event()
+        backend.block_at = "revalidating"
+        backend.block_entered = entered
+        backend.block_release = release
+        results = []
+        worker = Thread(
+            target=lambda: results.append(
+                app.execute_prepared(
+                    prepared,
+                    "APPLY CONFIG",
+                    cancellation=token,
+                )
+            )
+        )
+        worker.start()
+        self.assertTrue(entered.wait(timeout=2.0))
+        token.cancel()
+        release.set()
+        worker.join(timeout=3.0)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].value.success)
+        self.assertEqual(backend.persistent_write_count, 0)
 
     def test_cancellation_immediately_before_first_write_writes_zero(self):
         backend, app, prepared = self.prepare_apply()
@@ -348,6 +401,30 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
                 self.assertTrue(result.value.success)
                 self.assertTrue(result.value.reconciliation_completed)
                 self.assertTrue(result.value.post_validation_completed)
+
+    def test_revalidation_and_transaction_failures_consume_preparation(self):
+        for state, fault in (
+            ({"baseline_matches": False}, None),
+            ({}, "before-writing"),
+        ):
+            with self.subTest(state=state, fault=fault):
+                backend, app, prepared = self.prepare_apply()
+                for key, value in state.items():
+                    setattr(backend, key, value)
+                backend.fault_at = fault
+                first = app.execute_prepared(prepared, "APPLY CONFIG")
+                self.assertFalse(first.value.success)
+                self.assertEqual(backend.persistent_write_count, 0)
+
+                backend.baseline_matches = True
+                backend.fault_at = None
+                retry = app.execute_prepared(prepared, "APPLY CONFIG")
+                self.assertFalse(retry.value.success)
+                self.assertIs(
+                    retry.value.error_code,
+                    ErrorCode.CONSUMED_PREPARATION,
+                )
+                self.assertEqual(backend.persistent_write_count, 0)
 
     def test_observer_failure_never_controls_transaction(self):
         backend, app, prepared = self.prepare_apply()
@@ -455,6 +532,7 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
             refresh = app.validate_details(private=False)
             self.assertFalse(refresh.ok)
             self.assertIs(refresh.error.code, ErrorCode.BUSY)
+            self.assertEqual(backend.persistent_write_count, 0)
         finally:
             release.set()
             worker.join(timeout=3.0)
@@ -466,6 +544,42 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
         backend.block_entered = None
         backend.block_release = None
         retry = app.execute_prepared(second, "APPLY CONFIG")
+        self.assertTrue(retry.value.success)
+
+    def test_process_wide_persistent_serialization_across_facades(self):
+        backend = FakeBackend(fake_baseline())
+        app1 = app_for(backend)
+        app2 = app_for(backend)
+        first = app1.prepare_apply(self.config).value
+        second = app2.prepare_apply(self.config).value
+        entered = Event()
+        release = Event()
+        backend.block_at = "revalidating"
+        backend.block_entered = entered
+        backend.block_release = release
+        results = []
+        worker = Thread(
+            target=lambda: results.append(
+                app1.execute_prepared(first, "APPLY CONFIG")
+            )
+        )
+        worker.start()
+        self.assertTrue(entered.wait(timeout=2.0))
+        try:
+            busy = app2.execute_prepared(second, "APPLY CONFIG")
+            self.assertFalse(busy.value.success)
+            self.assertIs(busy.value.error_code, ErrorCode.BUSY)
+            self.assertEqual(backend.persistent_write_count, 0)
+        finally:
+            release.set()
+            worker.join(timeout=3.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(results[0].value.success)
+
+        backend.block_at = None
+        backend.block_entered = None
+        backend.block_release = None
+        retry = app2.execute_prepared(second, "APPLY CONFIG")
         self.assertTrue(retry.value.success)
 
     def test_preparation_cannot_cross_facade_boundary(self):

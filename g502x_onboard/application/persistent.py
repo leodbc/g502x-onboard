@@ -253,7 +253,13 @@ def prepare_apply(
     try:
         path, config = load_config(config_path)
         plan = build_plan(config, context.baseline_map())
-    except (ConfigError, OSError, ValueError):
+    except ConfigError as exc:
+        return _failure(
+            ErrorCode.CONFIG_ERROR,
+            str(exc),
+            PrivacyClass.LOCAL_SENSITIVE,
+        )
+    except (OSError, ValueError):
         return _failure(
             ErrorCode.INVALID_INPUT,
             "configuration could not be loaded or compiled",
