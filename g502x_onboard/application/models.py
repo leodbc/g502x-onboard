@@ -127,10 +127,10 @@ class PreparedOperation:
 
     preparation_id: str
     kind: PersistentOperationKind
-    review: ApplyReview
-    plan_digest: str
-    active_baseline_binding: str
-    exact_unit_binding: str
+    review: ApplyReview = field(repr=False)
+    plan_digest: str = field()
+    active_baseline_binding: str = field(repr=False)
+    exact_unit_binding: str = field(repr=False)
     compatibility: CompatibilityObservation
     observed_preconditions: tuple[str, ...]
     host_guard_clear: bool
@@ -142,9 +142,9 @@ class PreparedOperation:
 class PreparationContext:
     """Backend-only snapshot consumed while constructing a preparation."""
 
-    baseline_images: tuple[tuple[int, bytes], ...]
-    active_baseline_binding: str
-    exact_unit_binding: str
+    baseline_images: tuple[tuple[int, bytes], ...] = field(repr=False)
+    active_baseline_binding: str = field(repr=False)
+    exact_unit_binding: str = field(repr=False)
     compatibility: CompatibilityObservation
     active_profile: int | None
     validation_ok: bool
