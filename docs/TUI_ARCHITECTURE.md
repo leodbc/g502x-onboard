@@ -44,7 +44,9 @@ tui -> application -> backend adapter -> existing device/HID stack
 cli -> application -> backend adapter -> existing device/HID stack
 ```
 
-`g502x_onboard/tui/**` must not import `hid`, `libs.*`, HID++ transport modules, or `g502x_onboard.device`. A static test must enforce this boundary. The real backend is the only application-side adapter allowed to bridge to current low-level device code.
+`g502x_onboard/tui/**` must depend only on the public application facade and typed application models. It must not import `hid`, `libs.*`, HID++ transport modules, `g502x_onboard.device`, `application.backend`, or `RealBackend`. It also must not reach hardware by spawning `g502x.py`/the CLI, using `os.system`/`subprocess`, `runpy`, or dynamic-import escape hatches. Static architecture tests must enforce these boundaries.
+
+Backend construction belongs to an application composition root/factory, not to TUI widgets, effects, screens, or the CLI adapter. The real backend is the only application-side bridge to current low-level device code. After CLI migration is complete, the CLI must use the same public application facade rather than retaining a second direct `.device` route.
 
 ## Shared application/operations layer
 
@@ -120,7 +122,9 @@ Timers may update presentation-only state (for example elapsed time or animation
 
 Textual is an optional UI dependency, not a requirement for the core CLI. Importing `g502x_onboard.cli`, running existing CLI commands, or running the core offline suite must not require Textual.
 
-The future `tui` entry point imports Textual lazily. If the optional dependency is absent, it must fail before hardware access with a concise install instruction. The exact packaging mechanism is deferred to the implementation milestone; this design milestone does not change `requirements.txt`.
+The future `tui` entry point imports Textual lazily. If the optional dependency is absent, it must fail before hardware access with a concise install instruction. The core `requirements.txt` remains sufficient for CLI/core use and must not acquire Textual merely because the TUI exists.
+
+The exact optional-packaging filename is deferred, but the release properties are not: every optional TUI runtime dependency and transitive dependency must be exactly pinned and hash-locked in a dedicated optional lock/equivalent reproducible input; no release workflow may install a floating `textual` requirement. Release metadata/SBOM generation must include the optional TUI dependency set when it is part of the v0.2.0 distribution. The release archive must contain the TUI entry point/source and its reproducible optional-install metadata, and CI must smoke-test the extracted release both without Textual (core/CLI still works) and with the locked optional TUI dependencies installed.
 
 ## Terminal behavior
 

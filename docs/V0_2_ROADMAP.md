@@ -22,27 +22,29 @@ No product code, requirements, or workflows change in Phase 0.
 
 ### Phase 1 - shared application contracts
 
-Introduce typed operation/result/privacy models and a synchronous backend protocol. Wrap existing hardware behavior in `RealBackend` without changing write ordering, guard semantics, recovery behavior, or CLI output intent.
+Introduce typed operation/result/privacy models, the public application facade, a synchronous backend protocol, and an application composition root/factory. Wrap existing hardware behavior in `RealBackend` without changing write ordering, guard semantics, recovery behavior, or CLI output intent.
 
-Add `FakeBackend` and contract tests first. Keep existing CLI commands on their current behavior until individual operations are migrated with parity tests.
+Add `FakeBackend` and contract tests first. The public facade may expose read-only/volatile operations and persistent **preparation/model** contracts, but Phase 1 must not expose a public "execute persistent write now" method that an adapter could call around the future prepared-operation protocol. Internal backend-parity tests may exercise preserved write primitives directly while they are being wrapped.
 
-Exit condition: application contracts can execute representative read-only and persistent workflows against FakeBackend while current CLI regressions remain green.
+Keep existing CLI persistent commands on their current proven path until the prepared persistent protocol is ready.
 
-### Phase 2 - migrate CLI orchestration
+Exit condition: application contracts can execute representative read-only/volatile workflows and build representative persistent preparations against FakeBackend; preserved persistent primitives have parity tests; no adapter-callable direct persistent bypass exists; current CLI regressions remain green.
 
-Move CLI hardware orchestration behind the shared operations layer in bounded slices. Preserve command names, arguments, confirmation phrases, private/shareable output semantics, exit behavior, operation locking, and validation.
+### Phase 2 - migrate non-persistent CLI orchestration and shared infrastructure
 
-No TUI is required for this phase.
+Move read-only, planning, reporting, baseline-administration, and other non-persistent CLI orchestration behind the public application facade in bounded slices. Migrate shared locking/result/privacy infrastructure needed by persistent operations, but keep the current CLI persistent write entry points on their proven path until Phase 3 can replace them atomically.
 
-Exit condition: CLI adapter contains formatting/input concerns, not duplicated write authority, and parity/regression tests prove unchanged safety semantics.
+Preserve command names, arguments, confirmation phrases, private/shareable/local-sensitive output semantics, exit behavior, operation locking, and validation. No TUI is required for this phase.
 
-### Phase 3 - prepared persistent operations
+Exit condition: migrated CLI operations contain formatting/input concerns rather than duplicated hardware authority, parity/regression tests prove unchanged behavior, and there is still no public direct persistent-execute bypass.
 
-Implement the prepare -> review -> typed confirmation -> revalidate -> execute state machine in the shared layer.
+### Phase 3 - prepared persistent operations and persistent CLI migration
 
-Persistent operations must bind their reviewed target, revalidate under the operation lock, and become non-cancellable from the first potentially persistent backend action through reconciliation/post-validation.
+Implement the prepare -> review -> typed confirmation -> revalidate -> execute state machine in the shared layer, then migrate `apply`, backup restore, and baseline restore to that protocol as one bounded safety change.
 
-Exit condition: the full failure/revalidation/cancellation matrix in `TUI_TEST_PLAN.md` passes against FakeBackend.
+Persistent operations must bind their reviewed target, revalidate under the operation lock, and reject cooperative UI cancellation from the first potentially persistent backend action through reconciliation/post-validation. This must not be implemented by swallowing process-level interruption or changing current CLI `KeyboardInterrupt`/exit semantics.
+
+Exit condition: CLI persistent commands and the future TUI path have exactly one adapter-callable persistent authority path, and the full failure/revalidation/cooperative-cancellation matrix in `TUI_TEST_PLAN.md` passes against FakeBackend.
 
 ### Phase 4 - TUI state engine
 
@@ -52,17 +54,21 @@ Exit condition: state/update tests cover all legal safety transitions without la
 
 ### Phase 5 - optional Textual adapter
 
-Add the Textual UI as an optional dependency surface with lazy import. The TUI invokes synchronous shared operations only through workers.
+Add the Textual UI as an optional dependency surface with lazy import. The TUI invokes synchronous shared operations only through workers and only through the public application facade.
 
-Implement keyboard-first navigation, explicit refresh, 80x24 constrained layout, `NO_COLOR` semantics, review/confirmation flow, privacy-safe/private diagnostic presentation, and operation result views.
+Add a dedicated exact-pinned, hash-locked optional dependency input/equivalent for Textual and all shipped transitive dependencies while keeping the core `requirements.txt` Textual-free.
 
-No background hardware polling is permitted.
+Implement keyboard-first navigation, explicit refresh, 80x24 constrained layout, `NO_COLOR` semantics, review/confirmation flow, privacy-safe/local-sensitive/private-diagnostic presentation, and operation result views.
 
-Exit condition: Textual harness tests pass with and without `NO_COLOR`, at 80x24, keyboard-only, and with scripted worker faults.
+No background hardware polling, CLI-spawn escape hatch, or direct backend construction is permitted.
+
+Exit condition: Textual harness tests pass with and without `NO_COLOR`, at 80x24, keyboard-only, with scripted worker faults, with static facade-boundary tests, and with an explicit no-Textual core/CLI test.
 
 ### Phase 6 - integration and release hardening
 
-Run complete offline tests and the existing CI matrix, adversarially review imports and write paths, update user-facing documentation for the optional TUI, and perform read-only smoke on validated hardware if available.
+Run complete offline tests and the expanded CI matrix, adversarially review imports/write paths/adapter escape hatches, update user-facing documentation for the optional TUI, and perform read-only smoke on validated hardware if available.
+
+Update release machinery so v0.2.0 release inputs, manifest, SPDX SBOM, deterministic ZIP, extracted-archive smoke, version/tag checks, and release notes all account for the TUI and its locked optional dependency set. Preserve a separate no-Textual core/CLI lane and the existing Linux x64, Windows x64, and Windows x86 reproducibility evidence.
 
 Physical persistent-write testing is required only if implementation changes persistent semantics. If such a change is discovered, stop and split it into a separately evidenced milestone rather than absorbing it into TUI work.
 
@@ -70,8 +76,8 @@ Physical persistent-write testing is required only if implementation changes per
 
 v0.2.0 is done only when all of the following are true:
 
-- CLI and TUI are adapters over one shared application/operations layer.
-- `g502x_onboard/tui/**` has no low-level HID, `libs.*`, or direct `g502x_onboard.device` imports, enforced by tests.
+- CLI and TUI are adapters over one shared public application/operations facade; neither adapter constructs/calls `RealBackend` or hardware primitives directly.
+- `g502x_onboard/tui/**` has no low-level HID, `libs.*`, direct `g502x_onboard.device`, `application.backend`, CLI-spawn, `runpy`, or dynamic-import hardware escape path, enforced by static/runtime boundary tests.
 - Real hardware access remains synchronous behind the application backend; the TUI uses workers solely for UI responsiveness.
 - Only one hardware operation can run at a time, with both in-process coordination and the existing cross-process operation lock.
 - Persistent destructive operations use a prepared-operation model with deterministic reviewed intent.
@@ -83,12 +89,14 @@ v0.2.0 is done only when all of the following are true:
 - Post-write validation remains mandatory.
 - There is no background hardware polling.
 - Unknown devices/transports/firmware/unstable identities remain read-only in both UI affordances and application enforcement.
-- Privacy-safe/shareable data is typed and kept distinct from private diagnostics; shareable exports pass the existing privacy validator.
+- Privacy-safe/shareable, local-sensitive/user-authored, and private-diagnostic data are distinct typed classes; shareable exports pass the existing privacy validator and review data cannot be accidentally promoted to shareable.
 - The TUI is fully operable by keyboard, preserves safety-critical content at 80x24, and remains semantically usable with `NO_COLOR`.
 - Textual is optional and lazily imported; existing CLI/core use works without it.
+- Textual and every shipped optional transitive dependency are exactly pinned/hash-locked in a reproducible optional dependency input, and v0.2.0 release manifest/SBOM metadata represents that dependency set.
 - FakeBackend covers normal paths, guard failures, stale preparation, hot-swap, ambiguous commit, reconciliation, post-validation failure, operation serialization, and cancellation boundaries.
-- Existing CLI workflows, confirmations, release checks, and supported-device claims remain regression-tested.
-- The existing Linux x64, Windows x64, and Windows x86 offline CI lanes pass.
+- Existing CLI workflows, confirmations, process-level interruption/exit behavior, release checks, and supported-device claims remain regression-tested.
+- The existing Linux x64, Windows x64, and Windows x86 offline CI lanes pass, plus explicit no-Textual core/CLI and locked-Textual TUI lanes.
+- The deterministic v0.2.0 release artifact contains a runnable TUI surface and optional dependency metadata, passes extracted-artifact smoke in both core-only and TUI-enabled modes, and uses v0.2.0-appropriate version/tag/release notes.
 - `v0.1.0` and its release/tag remain untouched.
 
 ## Explicit non-goals for v0.2.0

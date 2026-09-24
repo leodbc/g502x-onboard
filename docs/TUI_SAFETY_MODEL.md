@@ -112,21 +112,24 @@ SUCCEEDED | FAILED
 
 `ARMED` means all execution-time gates passed but no persistent write has started. Cancellation is still allowed at this point.
 
-The transition to `WRITING` occurs immediately before the first backend action that can persist bytes. From that transition onward, the transaction is non-cancellable by the TUI.
+The transition to `WRITING` occurs immediately before the first backend action that can persist bytes. From that transition onward, the transaction is non-cancellable through the application's cooperative/TUI cancellation channel.
 
 ## Non-cancellable after first persistent write begins
 
-Before `WRITING`, Esc/back/cancel may abandon the prepared operation without hardware mutation.
+Here, "cancellation" means a cooperative application/TUI request such as Esc, back, modal close, or worker-cancel. It does **not** mean swallowing process-level interruption. Existing CLI `KeyboardInterrupt`/exit behavior remains a compatibility constraint unless a separately approved milestone changes it; SIGINT/SIGTERM, terminal loss, process kill, power loss, OS termination, or machine failure may still interrupt the process.
+
+Before `WRITING`, cooperative Esc/back/cancel may abandon the prepared operation without hardware mutation.
 
 Once `WRITING` begins:
 
-- the TUI must not cancel, interrupt, replace, or start another hardware operation;
-- closing a modal or navigating away cannot stop the worker;
-- a worker cancellation request is ignored/deferred until the transaction reaches a terminal result;
-- the application continues required write sequencing, fresh readback/reconciliation, and post-write validation;
+- the TUI must not translate Esc/back/modal close/worker-cancel into thread termination, process termination, or cancellation of the active hardware call;
+- the TUI must not replace the active operation or start another hardware operation;
+- closing or navigating away from a modal cannot stop the worker;
+- a cooperative worker cancellation request is ignored/deferred until the transaction reaches a terminal result;
+- while the process remains alive, the application continues required write sequencing, fresh readback/reconciliation, and post-write validation;
 - the UI must visibly state that the transaction is in a non-cancellable safety phase.
 
-This is an in-process guarantee. Power loss, OS termination, process kill, hardware disconnect, or machine failure can still interrupt execution. Those failures remain governed by existing reconciliation/recovery semantics; the TUI must not invent an automatic unsafe recovery write.
+This is an in-process cooperative guarantee, not a claim that Python or the operating system can make a hardware transaction uninterruptible. Process-level interruption and hardware disconnect remain governed by existing reconciliation/recovery semantics; the TUI must not invent an automatic unsafe recovery write or report that no write occurred without authoritative readback.
 
 ## Ambiguous write outcomes
 
@@ -164,17 +167,28 @@ Read-only discovery never upgrades support. Persistent support continues to requ
 
 ## Privacy classes
 
-TUI/application outputs are explicitly classified as one of:
+TUI/application outputs are explicitly classified into three classes so ordinary user-authored configuration is not confused with either public evidence or raw diagnostics:
 
 ### Privacy-safe / shareable
 
-Derived only from existing sanitized reporting/public-summary logic. These views may include compatibility and structural summaries that intentionally omit unit IDs, serial numbers, private fingerprints, local baselines/backups, raw sectors, and personal macro/profile contents.
+Derived only from existing sanitized reporting/public-summary logic. These views may include compatibility and structural summaries that intentionally omit unit IDs, serial numbers, private fingerprints, local baselines/backups, raw sectors, local paths, and personal macro/profile contents.
 
 Any export offered as shareable must pass the existing privacy validator (`assert_public_report_safe` or its shared-layer equivalent) on the exact emitted payload.
 
+### Local sensitive / user-authored
+
+Contains data the user intentionally supplied or requested for the local workflow, such as configuration paths, profile names, bindings/macros, deterministic plan/review detail, or backup labels. The current CLI already treats plan JSON as local configuration output rather than a privacy-minimized shareable report.
+
+A prepared-operation review normally belongs to this class: it may show enough user-authored intent to review the operation, but it must not expose exact-unit identifiers, private fingerprints, raw sector/baseline bytes, or other private diagnostic state. Local-sensitive content:
+
+- may be displayed as part of the explicit local operation without a diagnostic opt-in;
+- must never be relabeled or exported through a shareable-report path;
+- must not be placed in operation ids, worker names, telemetry, or default crash titles/log labels;
+- must be cleared when transitioning to a privacy-safe/shareable view rather than merely hidden.
+
 ### Private diagnostic
 
-May contain per-unit identity, fingerprints, raw state, personal profile names/bindings/macros, local paths, or other data already treated as private by the project.
+May contain per-unit identity, serials, private fingerprints, raw sectors/state, baseline/backup contents, or other device-specific material already treated as private by the project.
 
 Private diagnostic surfaces must:
 
@@ -184,7 +198,7 @@ Private diagnostic surfaces must:
 - avoid putting secrets/private identifiers into worker names, operation ids, logs, crash titles, or telemetry;
 - require explicit opt-in for raw/private detail, preserving current CLI semantics.
 
-The classification is part of typed application data so a widget cannot accidentally present private data as shareable.
+The classification is part of typed application data so a widget cannot accidentally present local-sensitive or private-diagnostic data as shareable.
 
 ## Host guards and read-only presentation
 

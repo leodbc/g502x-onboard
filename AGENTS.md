@@ -35,8 +35,9 @@ Never broaden hardware support from descriptor similarity, external reports, or 
 
 The v0.2.0 terminal UI is an adapter, not a second hardware implementation.
 
-- CLI and TUI must call one shared application/operations layer.
-- `tui/**` must not import `hid`, `libs.*`, HID++ transport modules, or `g502x_onboard.device` directly.
+- CLI and TUI must call one shared public application/operations facade. Adapters may not construct or call `RealBackend` or backend primitives directly.
+- `tui/**` must not import `hid`, `libs.*`, HID++ transport modules, `g502x_onboard.device`, or `application.backend` directly, and must not reach hardware indirectly by spawning the CLI, using `runpy`, or dynamic-import escape hatches.
+- Backend construction belongs to an application composition root/factory outside adapter widgets/effects. The real hardware backend is the sole bridge from application operations to the current device/HID stack.
 - The real hardware backend remains synchronous. TUI responsiveness is provided by workers around application operations, not by making HID access asynchronous.
 - The application layer owns operation serialization, safety gates, prepared-operation revalidation, write transaction semantics, and privacy classification.
 - UI state must never be the sole authority for a hardware write. Backend/application checks remain authoritative.

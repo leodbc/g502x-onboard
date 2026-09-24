@@ -37,13 +37,16 @@ Fixtures must never weaken application checks merely because the backend is fake
 
 Require:
 
-- no `hid`, `libs.*`, HID++ transport, or `g502x_onboard.device` imports anywhere under `g502x_onboard/tui/**`;
-- TUI code imports hardware operations only through the shared application package;
+- no `hid`, `libs.*`, HID++ transport, `g502x_onboard.device`, `application.backend`, or `RealBackend` imports anywhere under `g502x_onboard/tui/**`;
+- TUI code calls hardware-affecting operations only through the public application facade;
+- TUI code cannot shell/spawn the CLI or hardware commands and contains no `subprocess`/`os.system`/`runpy`/dynamic-import escape hatch to bypass that facade;
+- backend construction occurs only in the approved application composition root/factory, never in TUI widgets/effects/screens;
+- after Phase 2/3 migration, the CLI adapter has no direct low-level `.device`/backend path for migrated operations;
 - importing/running the existing CLI succeeds when Textual is not installed;
 - importing core application models does not import Textual;
 - optional TUI bootstrap fails cleanly before hardware access when Textual is absent.
 
-Use AST/import-graph checks rather than grep where practical.
+Use AST/import-graph checks plus a runtime facade/backend spy where practical; grep alone is insufficient because dynamic imports and subprocess escape hatches must also fail the architecture gate.
 
 ### 2. Application contract tests
 
@@ -81,16 +84,17 @@ Use controlled blocking FakeBackend calls to prove:
 
 Drive the persistent phase machine deterministically.
 
-Verify cancellation:
+Verify cooperative cancellation:
 
 - succeeds in `PREPARED`, `REVIEWING`, `CONFIRMING`, `REVALIDATING`, and `ARMED` before the first persistent write;
 - cannot stop the worker after the transition to `WRITING`;
 - cannot replace the active operation with another operation;
-- does not skip reconciliation or post-write validation;
+- does not skip reconciliation or post-write validation while the process remains alive;
 - produces an explicit non-cancellable state in the model/view;
-- still yields a terminal result after a cancellation attempt during write.
+- still yields a terminal result after an Esc/back/worker-cancel request during write;
+- never implements post-`WRITING` cancellation by killing a thread/process or raising an asynchronous exception.
 
-Inject exceptions immediately before and immediately after the first potentially persistent backend call to lock down the exact boundary.
+Separately test process-level interruption as a failure mode rather than calling it cooperative cancellation: preserve existing CLI `KeyboardInterrupt`/exit behavior, and verify that an interruption/disconnect after a potentially persistent action is never reported as "unchanged" without authoritative reconciliation. Inject exceptions immediately before and immediately after the first potentially persistent backend call to lock down the exact boundary.
 
 ### 5. Model / Update / View tests
 
@@ -132,15 +136,17 @@ For each case:
 
 ### 8. Privacy tests
 
-Maintain separate typed fixtures for privacy-safe and private diagnostic data.
+Maintain separate typed fixtures for privacy-safe/shareable, local-sensitive/user-authored, and private-diagnostic data.
 
 Verify:
 
-- shareable exports pass the existing public-report validator on emitted bytes/data;
-- unit IDs, serials, private fingerprints, raw sectors, baseline/backup data, personal profile names/macros, and private paths never enter shareable view models;
-- private surfaces are visibly labeled before data is revealed;
-- private payloads are never placed in operation ids, worker names, exception titles, or default shareable logs;
-- switching from private to shareable views clears private content rather than merely hiding the widget.
+- shareable exports pass the existing public-report validator on the exact emitted bytes/data;
+- unit IDs, serials, private fingerprints, raw sectors, baseline/backup contents, personal profile names/macros, and private/local paths never enter shareable view models;
+- a plan/review containing profile names, bindings, or macros is classified local-sensitive rather than shareable or private-diagnostic;
+- local-sensitive review data can be shown for the explicit local workflow without exposing device identity/raw baseline state;
+- private diagnostic surfaces are visibly labeled before data is revealed;
+- local-sensitive/private payloads are never placed in operation ids, worker names, exception titles, telemetry, or default shareable logs;
+- switching from local-sensitive or private-diagnostic views to shareable views clears sensitive content rather than merely hiding the widget.
 
 ### 9. Keyboard-first and 80x24 tests
 
@@ -196,6 +202,18 @@ python g502x.py capabilities --json
 ```
 
 The repository CI matrix must also pass on its existing Linux x64, Windows x64, and Windows x86 lanes. Any TUI-specific test dependency must be isolated so the core/CLI no-Textual path is also tested.
+
+Before the v0.2.0 release is eligible, release/dependency gates must additionally prove:
+
+- the core/CLI lane installs only the existing core lock and succeeds with Textual absent;
+- every optional TUI dependency and transitive dependency is exactly pinned and hash-locked in a dedicated optional lock/equivalent reproducible input;
+- a TUI lane installs only that locked optional set and runs the Textual harness tests;
+- release manifest/SBOM metadata records the optional TUI dependency set shipped for v0.2.0 rather than describing only the core `hid` dependency;
+- the deterministic release ZIP contains the TUI entry point/source and optional-install lock/metadata;
+- an extracted release smoke succeeds both without optional dependencies (CLI/core path) and with the locked TUI dependencies installed;
+- cross-platform release reproducibility still passes after the additional files/dependencies;
+- version/tag/release gates identify v0.2.0, while the historical `v0.1.0` tag/release remains untouched;
+- release notes are version-appropriate and do not reuse the current v0.1.0-only "First public release" wording.
 
 ## Hardware validation scope
 
