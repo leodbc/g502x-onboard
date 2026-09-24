@@ -51,7 +51,7 @@ from .persistent import (
 
 
 class ApplicationFacade:
-    """Adapter-facing Phase-1 use cases; no direct persistent execution exists."""
+    """Adapter-facing use cases with one prepared persistent execution authority."""
 
     __slots__ = ("_id_factory", "__weakref__")
 

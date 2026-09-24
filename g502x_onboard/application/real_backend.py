@@ -76,7 +76,7 @@ def _read_only(observed: CompatibilityObservation) -> CompatibilityObservation:
 
 
 class RealBackend:
-    """Sole Phase-1 application bridge to the existing synchronous device stack."""
+    """Sole application bridge to the existing synchronous device stack."""
 
     def probe(self) -> ProbeSnapshot:
         from ..device import probe_device

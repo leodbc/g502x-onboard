@@ -1,4 +1,4 @@
-"""Public application facade and typed Phase-1 contracts."""
+"""Public application facade and typed adapter contracts."""
 
 from .composition import create_application
 from .facade import ApplicationFacade
