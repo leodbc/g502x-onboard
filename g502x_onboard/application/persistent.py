@@ -479,10 +479,159 @@ def execute_prepared(
                 trace=trace,
             )
 
-    claim = None
     try:
-        claim = coordinator.claim()
-        claim.__enter__()
+        # Use the coordinator as a real context manager.  Once __enter__ has
+        # acquired the process-wide claim, Python establishes __exit__ cleanup
+        # before any accepted-execution code runs.  BaseException (including
+        # KeyboardInterrupt/SystemExit) still propagates, but cannot strand
+        # _PROCESS_LOCK in a surviving process.
+        with coordinator.claim():
+            with _REGISTRY_LOCK:
+                record = _PREPARATIONS.get(prepared.preparation_id)
+                if (
+                    record is None
+                    or record.owner() is not owner
+                    or prepared != record.public
+                ):
+                    return _terminal(
+                        prepared,
+                        success=False,
+                        status="stale-preparation",
+                        error_code=ErrorCode.STALE_PREPARATION,
+                        message="preparation changed before execution claim",
+                        trace=trace,
+                    )
+                if record.consumed:
+                    return _terminal(
+                        prepared,
+                        success=False,
+                        status="consumed-preparation",
+                        error_code=ErrorCode.CONSUMED_PREPARATION,
+                        message="preparation has already been consumed; prepare again",
+                        trace=trace,
+                    )
+                record.consumed = True
+                intent = record.intent
+
+            def emit(phase: PersistentPhase) -> None:
+                if not trace or trace[-1] is not phase:
+                    trace.append(phase)
+                if observer is not None:
+                    try:
+                        observer(
+                            PersistentPhaseSnapshot(
+                                phase=phase,
+                                kind=prepared.kind,
+                                cancellation_allowed=phase in {
+                                    PersistentPhase.PREPARING,
+                                    PersistentPhase.PREPARED,
+                                    PersistentPhase.REVIEWING,
+                                    PersistentPhase.CONFIRMING,
+                                    PersistentPhase.REVALIDATING,
+                                    PersistentPhase.ARMED,
+                                },
+                            )
+                        )
+                    except Exception:
+                        pass
+
+            emit(PersistentPhase.REVALIDATING)
+            if token.is_cancelled:
+                return _terminal(
+                    prepared,
+                    success=False,
+                    status="cancelled-before-write",
+                    error_code=ErrorCode.CANCELLED,
+                    message="operation cancelled during revalidation",
+                    trace=trace,
+                )
+
+            try:
+                value = backend.execute_persistent(intent, token, emit)
+            except CooperativeCancellationError:
+                return _terminal(
+                    prepared,
+                    success=False,
+                    status="cancelled-before-write",
+                    error_code=ErrorCode.CANCELLED,
+                    message="operation cancelled before the first persistent write",
+                    trace=trace,
+                    writing_started=PersistentPhase.WRITING in trace,
+                )
+            except PersistentBackendFailure as exc:
+                reconciled = bool(exc.reconciliation_completed)
+                post_validated = bool(exc.post_validation_completed) and reconciled
+                return _terminal(
+                    prepared,
+                    success=False,
+                    status=(
+                        "failed-after-write"
+                        if PersistentPhase.WRITING in trace
+                        else "revalidation-refused"
+                    ),
+                    error_code=ErrorCode.BACKEND_FAILURE,
+                    message="persistent operation refused or failed",
+                    trace=trace,
+                    writing_started=PersistentPhase.WRITING in trace,
+                    reconciliation_completed=reconciled,
+                    post_validation_completed=post_validated,
+                )
+            except Exception:
+                return _terminal(
+                    prepared,
+                    success=False,
+                    status=(
+                        "failed-after-write"
+                        if PersistentPhase.WRITING in trace
+                        else "revalidation-refused"
+                    ),
+                    error_code=ErrorCode.BACKEND_FAILURE,
+                    message="persistent operation refused or failed",
+                    trace=trace,
+                    writing_started=PersistentPhase.WRITING in trace,
+                    reconciliation_completed=False,
+                    post_validation_completed=False,
+                )
+
+            reconciled = bool(value.reconciliation_completed)
+            post_validated = bool(value.post_validation_completed) and reconciled
+            required_success_phases = (
+                PersistentPhase.ARMED,
+                PersistentPhase.WRITING,
+                PersistentPhase.RECONCILING,
+                PersistentPhase.POST_VALIDATING,
+            )
+            lifecycle_complete = all(phase in trace for phase in required_success_phases)
+            if not (reconciled and post_validated and lifecycle_complete):
+                return _terminal(
+                    prepared,
+                    success=False,
+                    status=(
+                        "failed-after-write"
+                        if PersistentPhase.WRITING in trace
+                        else "revalidation-refused"
+                    ),
+                    error_code=ErrorCode.BACKEND_FAILURE,
+                    message="persistent operation refused or failed",
+                    trace=trace,
+                    writing_started=PersistentPhase.WRITING in trace,
+                    reconciliation_completed=reconciled,
+                    post_validation_completed=post_validated,
+                )
+
+            return _terminal(
+                prepared,
+                success=True,
+                status="completed",
+                error_code=None,
+                message="persistent operation completed and fully validated",
+                trace=trace,
+                writing_started=True,
+                reconciliation_completed=True,
+                post_validation_completed=True,
+                enabled_profiles=value.enabled_profiles,
+                safety_backup_name=value.safety_backup_name,
+            )
     except OperationBusyError:
         with _REGISTRY_LOCK:
             record = _PREPARATIONS.get(prepared.preparation_id)
@@ -500,126 +649,3 @@ def execute_prepared(
             ),
             trace=trace,
         )
-
-    try:
-        with _REGISTRY_LOCK:
-            record = _PREPARATIONS.get(prepared.preparation_id)
-            if (
-                record is None
-                or record.owner() is not owner
-                or prepared != record.public
-            ):
-                return _terminal(
-                    prepared,
-                    success=False,
-                    status="stale-preparation",
-                    error_code=ErrorCode.STALE_PREPARATION,
-                    message="preparation changed before execution claim",
-                    trace=trace,
-                )
-            if record.consumed:
-                return _terminal(
-                    prepared,
-                    success=False,
-                    status="consumed-preparation",
-                    error_code=ErrorCode.CONSUMED_PREPARATION,
-                    message="preparation has already been consumed; prepare again",
-                    trace=trace,
-                )
-            record.consumed = True
-            intent = record.intent
-
-        def emit(phase: PersistentPhase) -> None:
-            if not trace or trace[-1] is not phase:
-                trace.append(phase)
-            if observer is not None:
-                try:
-                    observer(
-                        PersistentPhaseSnapshot(
-                            phase=phase,
-                            kind=prepared.kind,
-                            cancellation_allowed=phase in {
-                                PersistentPhase.PREPARING,
-                                PersistentPhase.PREPARED,
-                                PersistentPhase.REVIEWING,
-                                PersistentPhase.CONFIRMING,
-                                PersistentPhase.REVALIDATING,
-                                PersistentPhase.ARMED,
-                            },
-                        )
-                    )
-                except Exception:
-                    pass
-
-        emit(PersistentPhase.REVALIDATING)
-        if token.is_cancelled:
-            return _terminal(
-                prepared,
-                success=False,
-                status="cancelled-before-write",
-                error_code=ErrorCode.CANCELLED,
-                message="operation cancelled during revalidation",
-                trace=trace,
-            )
-
-        try:
-            value = backend.execute_persistent(intent, token, emit)
-        except CooperativeCancellationError:
-            return _terminal(
-                prepared,
-                success=False,
-                status="cancelled-before-write",
-                error_code=ErrorCode.CANCELLED,
-                message="operation cancelled before the first persistent write",
-                trace=trace,
-                writing_started=PersistentPhase.WRITING in trace,
-            )
-        except PersistentBackendFailure as exc:
-            return _terminal(
-                prepared,
-                success=False,
-                status=(
-                    "failed-after-write"
-                    if PersistentPhase.WRITING in trace
-                    else "revalidation-refused"
-                ),
-                error_code=ErrorCode.BACKEND_FAILURE,
-                message="persistent operation refused or failed",
-                trace=trace,
-                writing_started=PersistentPhase.WRITING in trace,
-                reconciliation_completed=exc.reconciliation_completed,
-                post_validation_completed=exc.post_validation_completed,
-            )
-        except Exception:
-            return _terminal(
-                prepared,
-                success=False,
-                status=(
-                    "failed-after-write"
-                    if PersistentPhase.WRITING in trace
-                    else "revalidation-refused"
-                ),
-                error_code=ErrorCode.BACKEND_FAILURE,
-                message="persistent operation refused or failed",
-                trace=trace,
-                writing_started=PersistentPhase.WRITING in trace,
-                reconciliation_completed=False,
-                post_validation_completed=False,
-            )
-
-        return _terminal(
-            prepared,
-            success=True,
-            status="completed",
-            error_code=None,
-            message="persistent operation completed and fully validated",
-            trace=trace,
-            writing_started=PersistentPhase.WRITING in trace,
-            reconciliation_completed=value.reconciliation_completed,
-            post_validation_completed=value.post_validation_completed,
-            enabled_profiles=value.enabled_profiles,
-            safety_backup_name=value.safety_backup_name,
-        )
-    finally:
-        if claim is not None:
-            claim.__exit__(None, None, None)
