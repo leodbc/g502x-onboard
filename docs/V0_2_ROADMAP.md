@@ -84,7 +84,7 @@ v0.2.0 is done only when all of the following are true:
 - Typed confirmation is required for destructive persistent operations.
 - All persistent write authority is revalidated after human review and immediately before writes.
 - A prepared operation is invalidated, not overridden, when baseline/device/host/recovery/target state changes.
-- From the first potentially persistent write onward, the in-process transaction is non-cancellable until reconciliation and post-write validation reach a terminal result.
+- From the first potentially persistent write onward, cooperative application/TUI cancellation cannot terminate the active transaction; independent terminal safety/backend failures still fail closed without extra writes, and `SUCCEEDED` is impossible until full post-write validation passes.
 - Fresh readback/reconciliation remains authoritative for ambiguous writes.
 - Post-write validation remains mandatory.
 - There is no background hardware polling.

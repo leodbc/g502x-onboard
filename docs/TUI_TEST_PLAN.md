@@ -89,7 +89,8 @@ Verify cooperative cancellation:
 - succeeds in `PREPARED`, `REVIEWING`, `CONFIRMING`, `REVALIDATING`, and `ARMED` before the first persistent write;
 - cannot stop the worker after the transition to `WRITING`;
 - cannot replace the active operation with another operation;
-- does not skip reconciliation or post-write validation while the process remains alive;
+- does not cause any reconciliation or success-path post-write validation that would otherwise run to be skipped;
+- allows an independent terminal safety/backend failure to end the transaction without extra writes, while recording reconciliation/validation status;
 - produces an explicit non-cancellable state in the model/view;
 - still yields a terminal result after an Esc/back/worker-cancel request during write;
 - never implements post-`WRITING` cancellation by killing a thread/process or raising an asynchronous exception.
@@ -106,7 +107,7 @@ Cover:
 - stale worker events ignored by operation id;
 - confirmation input reset when preparation changes;
 - invalidation returns the user to a new-prepare path rather than preserving confirmation;
-- private diagnostic classification survives every state transition;
+- local-sensitive and private-diagnostic classifications survive every state transition;
 - errors do not silently drop an active non-cancellable transaction;
 - view models contain explicit labels for read-only state, privacy class, and non-cancellable write phase.
 
@@ -188,7 +189,7 @@ For each persistent write stage inject:
 - reconnect reveals a different exact-unit identity;
 - post-write validation failure.
 
-Assert the application result matches existing safety semantics and never blindly retries an indeterminate state.
+Assert the application result matches existing safety semantics, never blindly retries an indeterminate state, never continues writes merely to reach post-validation after a terminal safety failure, and never reports `SUCCEEDED` unless full post-write validation passed.
 
 ## Required commands before v0.2.0 release
 

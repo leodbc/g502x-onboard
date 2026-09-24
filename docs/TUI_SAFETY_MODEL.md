@@ -126,10 +126,12 @@ Once `WRITING` begins:
 - the TUI must not replace the active operation or start another hardware operation;
 - closing or navigating away from a modal cannot stop the worker;
 - a cooperative worker cancellation request is ignored/deferred until the transaction reaches a terminal result;
-- while the process remains alive, the application continues required write sequencing, fresh readback/reconciliation, and post-write validation;
+- while the process remains alive and no independent terminal safety/backend failure occurs, the application continues the write/reconciliation/validation path that the operation would have followed without the cancellation request;
+- cooperative cancellation itself must never skip required reconciliation or a success-path post-write validation;
+- an independent terminal failure (for example indeterminate bytes, identity hot-swap, guard failure, disconnect, or another fail-closed condition) still ends the transaction according to existing semantics; the application must not perform extra writes merely to "finish" after such a failure;
 - the UI must visibly state that the transaction is in a non-cancellable safety phase.
 
-This is an in-process cooperative guarantee, not a claim that Python or the operating system can make a hardware transaction uninterruptible. Process-level interruption and hardware disconnect remain governed by existing reconciliation/recovery semantics; the TUI must not invent an automatic unsafe recovery write or report that no write occurred without authoritative readback.
+This is an in-process cooperative guarantee, not a claim that Python or the operating system can make a hardware transaction uninterruptible. Process-level interruption and hardware disconnect remain governed by existing reconciliation/recovery semantics; the TUI must not invent an automatic unsafe recovery write or report that no write occurred without authoritative readback. A persistent operation may reach `FAILED` from a write/reconciliation phase; it does not have to execute further writes or reach `POST_VALIDATING` after an independent terminal safety failure.
 
 ## Ambiguous write outcomes
 
@@ -138,6 +140,12 @@ Transport acknowledgements are not authoritative. If a write call fails after by
 The TUI may display "reconciling" or an indeterminate state while this occurs, but it cannot classify the write as failed/unchanged until the application has done so from observed bytes.
 
 No blind retry is permitted when observed bytes match neither the previous state nor the intended target.
+
+## Post-write validation is a success gate
+
+Full post-write validation remains mandatory before a completed persistent operation may report `SUCCEEDED`. A cooperative cancellation request after `WRITING` cannot bypass that validation on an otherwise successful path.
+
+This does not authorize continuing writes after an independent terminal failure. If existing write/reconciliation logic terminates because bytes are partial/indeterminate, exact-unit identity changes, a guard fails closed, or another terminal safety condition occurs, the operation remains `FAILED`; its result must preserve the authoritative reconciliation state and explicitly record whether full post-write validation completed or was not safely reachable. The TUI must not promote such a result to success.
 
 ## One hardware operation at a time
 
