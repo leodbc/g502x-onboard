@@ -445,15 +445,25 @@ class Phase3ArchitectureTests(unittest.TestCase):
             and node.module == "device"
         ]
         self.assertEqual(direct_device_imports, [])
-        for forbidden in (
-            "apply_plan(",
-            "restore_backup(",
-            "restore_baseline(",
-            "exclusive_operation_lock(",
-            "validate_device(",
-            "RealBackend(",
-        ):
-            self.assertNotIn(forbidden, source)
+        direct_calls = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+        }
+        self.assertTrue(
+            {
+                "apply_plan",
+                "restore_backup",
+                "restore_baseline",
+                "exclusive_operation_lock",
+                "validate_device",
+                "RealBackend",
+            }.isdisjoint(direct_calls)
+        )
+        self.assertNotIn("exclusive_operation_lock", source)
+        self.assertNotIn("validate_device", source)
+        self.assertNotIn("RealBackend", source)
 
     def test_one_public_persistent_executor_no_operation_specific_bypass(self):
         self.assertTrue(callable(getattr(ApplicationFacade, "execute_prepared")))
