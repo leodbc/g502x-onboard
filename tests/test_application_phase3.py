@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import ast
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+import hashlib
 from dataclasses import replace
 import json
 import struct
@@ -14,11 +15,17 @@ from unittest.mock import patch
 
 from g502x_onboard.application import (
     CancellationToken,
+    CompatibilityObservation,
     ErrorCode,
     PersistentOperationKind,
     PersistentPhase,
     PreparedOperation,
     PrivacyClass,
+    WriteEligibility,
+)
+from g502x_onboard.application.backend import (
+    PersistentBackendIntent,
+    PersistentTargetSnapshot,
 )
 from g502x_onboard.application.facade import ApplicationFacade
 from g502x_onboard.application.fake_backend import FakeBackend
@@ -288,6 +295,36 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
         self.assertIn(PersistentPhase.ARMED, result.value.phase_trace)
         self.assertNotIn(PersistentPhase.WRITING, result.value.phase_trace)
 
+    def test_cancellation_immediately_before_first_write_writes_zero(self):
+        backend, app, prepared = self.prepare_apply()
+        token = CancellationToken()
+        entered = Event()
+        release = Event()
+        backend.block_at = "before-first-write"
+        backend.block_entered = entered
+        backend.block_release = release
+        results = []
+        worker = Thread(
+            target=lambda: results.append(
+                app.execute_prepared(
+                    prepared,
+                    "APPLY CONFIG",
+                    cancellation=token,
+                )
+            )
+        )
+        worker.start()
+        self.assertTrue(entered.wait(timeout=2.0))
+        token.cancel()
+        release.set()
+        worker.join(timeout=3.0)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(backend.persistent_write_count, 0)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].value.success)
+        self.assertIn(PersistentPhase.ARMED, results[0].value.phase_trace)
+        self.assertNotIn(PersistentPhase.WRITING, results[0].value.phase_trace)
+
     def test_cancellation_from_writing_onward_is_deferred(self):
         for phase in (
             PersistentPhase.WRITING,
@@ -336,14 +373,14 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
 
     def test_failure_and_reconciliation_fault_matrix(self):
         cases = (
-            ("before-writing", 0, False),
-            ("after-potential-commit", 1, True),
-            ("fresh-readback-indeterminate", 1, True),
-            ("fresh-readback-previous", 3, True),
-            ("final-reconciliation", 14, True),
-            ("post-validation", 14, True),
+            ("before-writing", 0, False, False, False),
+            ("after-potential-commit", 1, True, False, False),
+            ("fresh-readback-indeterminate", 1, True, False, False),
+            ("fresh-readback-previous", 3, True, False, False),
+            ("final-reconciliation", 14, True, False, False),
+            ("post-validation", 14, True, True, False),
         )
-        for fault, expected_writes, writing_started in cases:
+        for fault, expected_writes, writing_started, reconciled, post_validated in cases:
             with self.subTest(fault=fault):
                 backend, app, prepared = self.prepare_apply()
                 backend.fault_at = fault
@@ -356,6 +393,14 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
                 self.assertEqual(
                     result.value.writing_started,
                     writing_started,
+                )
+                self.assertEqual(
+                    result.value.reconciliation_completed,
+                    reconciled,
+                )
+                self.assertEqual(
+                    result.value.post_validation_completed,
+                    post_validated,
                 )
 
     def test_reconciled_target_failure_continues_without_duplicate_transaction(self):
@@ -375,7 +420,8 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
         result = app.execute_prepared(prepared, "APPLY CONFIG")
         self.assertFalse(result.value.success)
         self.assertTrue(result.value.writing_started)
-        self.assertFalse(result.value.post_validation_completed)
+        self.assertTrue(result.value.reconciliation_completed)
+        self.assertTrue(result.value.post_validation_completed)
 
     def test_concurrent_duplicate_and_busy_different_preparation(self):
         backend = FakeBackend(fake_baseline())
@@ -432,6 +478,212 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
             ErrorCode.UNKNOWN_PREPARATION,
         )
         self.assertEqual(backend.persistent_write_count, 0)
+
+
+class RealBackendPersistentParityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.baseline = fake_baseline()
+        self.manifest = {"fingerprint": "fixture"}
+        self.config = Path(self.temp.name) / "config.json"
+        config = {
+            "format": 1,
+            "profiles": {
+                "2": {
+                    "settings": {"name": "WORK"},
+                    "buttons": {"G4": "copy"},
+                }
+            },
+        }
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        from g502x_onboard.codec import build_plan, plan_json
+
+        self.plan = build_plan(config, self.baseline)
+        self.plan_digest = hashlib.sha256(
+            plan_json(self.plan).encode("utf-8")
+        ).hexdigest()
+        self.source_digest = hashlib.sha256(
+            json.dumps(
+                config,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        self.compat = CompatibilityObservation(
+            architecture="compatible",
+            transport="tested",
+            identity="unit-bound",
+            write_allowed=True,
+            eligibility=WriteEligibility.ELIGIBLE,
+        )
+
+    def _intent(self, kind):
+        if kind is PersistentOperationKind.APPLY_CONFIG:
+            return PersistentBackendIntent(
+                kind=kind,
+                target_digest=self.plan_digest,
+                active_baseline_binding="fixture",
+                exact_unit_binding="fixture",
+                compatibility=self.compat,
+                managed_sectors=tuple(PROGRAMMABLE_SECTORS),
+                source_path=str(self.config),
+                source_digest=self.source_digest,
+                plan=self.plan,
+                normalized_config=json.loads(
+                    self.config.read_text(encoding="utf-8")
+                ),
+            )
+        return PersistentBackendIntent(
+            kind=kind,
+            target_digest="restore-target",
+            active_baseline_binding="fixture",
+            exact_unit_binding="fixture",
+            compatibility=self.compat,
+            managed_sectors=tuple(PROGRAMMABLE_SECTORS),
+            source_path=(
+                "backup-fixture"
+                if kind is PersistentOperationKind.RESTORE_BACKUP
+                else None
+            ),
+        )
+
+    def test_shared_real_backend_path_keeps_outer_lock_through_post_validation(self):
+        import g502x_onboard.application._persistent_backend as pb
+
+        for kind in (
+            PersistentOperationKind.APPLY_CONFIG,
+            PersistentOperationKind.RESTORE_BACKUP,
+            PersistentOperationKind.RESTORE_BASELINE,
+        ):
+            with self.subTest(kind=kind):
+                events = []
+                phases = []
+                captured = {}
+
+                @contextmanager
+                def lock(_path):
+                    events.append("lock-enter")
+                    try:
+                        yield
+                    finally:
+                        events.append("lock-exit")
+
+                class Dev:
+                    def close(self):
+                        events.append("device-close")
+
+                def primitive(*args, **kwargs):
+                    captured.update(kwargs)
+                    events.append("primitive")
+                    kwargs["before_first_write"]()
+                    events.append("staging")
+                    kwargs["before_final_reconcile"]()
+                    events.append("final-readback")
+                    return Path("safety")
+
+                report = type(
+                    "Report",
+                    (),
+                    {"ok": True, "enabled_profiles": (1, 2)},
+                )()
+                patches = [
+                    patch.object(
+                        pb,
+                        "exclusive_operation_lock",
+                        side_effect=lock,
+                    ),
+                    patch.object(
+                        pb,
+                        "require_ghub_closed",
+                        side_effect=lambda: events.append("host-guard"),
+                    ),
+                    patch.object(
+                        pb,
+                        "active_baseline",
+                        return_value=(self.baseline, self.manifest),
+                    ),
+                    patch.object(
+                        pb,
+                        "assert_active_device_matches_baseline",
+                        return_value=self.manifest,
+                    ),
+                    patch.object(
+                        pb,
+                        "validate_recovery",
+                        side_effect=lambda: events.append("recovery"),
+                    ),
+                    patch.object(
+                        pb,
+                        "connect_manifest_unit",
+                        return_value=Dev(),
+                    ),
+                    patch.object(pb, "get_current_profile", return_value=1),
+                    patch.object(
+                        pb,
+                        "ensure_safe_profile",
+                        side_effect=lambda _m: events.append("safe-profile"),
+                    ),
+                    patch.object(
+                        pb,
+                        "_load_target_locked",
+                        return_value=PersistentTargetSnapshot(
+                            source_path="backup-fixture",
+                            source_name="backup-fixture",
+                            target_digest="restore-target",
+                        ),
+                    ),
+                    patch.object(pb, "apply_plan", side_effect=primitive),
+                    patch.object(pb, "restore_backup", side_effect=primitive),
+                    patch.object(pb, "restore_baseline", side_effect=primitive),
+                    patch.object(
+                        pb,
+                        "validate_device",
+                        side_effect=lambda: (
+                            events.append("post-validate")
+                            or (self.baseline, report)
+                        ),
+                    ),
+                    patch.object(
+                        pb,
+                        "private_write_text",
+                        side_effect=lambda *a, **k: events.append(
+                            "private-record"
+                        ),
+                    ),
+                ]
+                with patches[0], patches[1], patches[2], patches[3], \
+                     patches[4], patches[5], patches[6], patches[7], \
+                     patches[8], patches[9], patches[10], patches[11], \
+                     patches[12], patches[13]:
+                    result = pb.execute_real_persistent(
+                        self._intent(kind),
+                        CancellationToken(),
+                        lambda phase: phases.append(phase),
+                    )
+
+                self.assertTrue(result.reconciliation_completed)
+                self.assertTrue(result.post_validation_completed)
+                self.assertEqual(events[0], "lock-enter")
+                self.assertEqual(events[-1], "lock-exit")
+                self.assertLess(
+                    events.index("primitive"),
+                    events.index("post-validate"),
+                )
+                self.assertIn(PersistentPhase.ARMED, phases)
+                self.assertIn(PersistentPhase.WRITING, phases)
+                self.assertIn(PersistentPhase.RECONCILING, phases)
+                self.assertIn(PersistentPhase.POST_VALIDATING, phases)
+                self.assertEqual(
+                    captured["expected_baseline_fingerprint"],
+                    "fixture",
+                )
+                if kind is not PersistentOperationKind.APPLY_CONFIG:
+                    self.assertEqual(
+                        captured["expected_target_digest"],
+                        "restore-target",
+                    )
 
 
 class Phase3ArchitectureTests(unittest.TestCase):
