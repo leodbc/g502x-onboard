@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import json
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
@@ -49,6 +51,19 @@ def fake_baseline() -> dict[int, bytes]:
         page[-2:] = struct.pack(">H", crc16_ccitt(page[:-2]))
         images[profile] = bytes(page)
     return images
+
+
+class CliRegressionSmokeTests(unittest.TestCase):
+    def test_python_g502x_help_command(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "g502x.py"), "--help"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("usage:", result.stdout.lower())
+        self.assertIn("g502x", result.stdout.lower())
 
 
 class ApplicationBoundaryTests(unittest.TestCase):
