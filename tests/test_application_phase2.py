@@ -6,8 +6,10 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event, Thread
+from unittest.mock import patch
 
-from g502x_onboard.application import ErrorCode, PrivacyClass
+from g502x_onboard.application import ErrorCode, PrivacyClass, create_application
 from g502x_onboard.application.coordinator import OperationCoordinator
 from g502x_onboard.application.facade import ApplicationFacade
 from g502x_onboard.application.fake_backend import FakeBackend
@@ -221,6 +223,65 @@ class Phase2ApplicationWorkflowTests(unittest.TestCase):
         self.assertIs(result.error.code, ErrorCode.BUSY)
         self.assertEqual(self.backend.persistent_write_count, 0)
 
+    def _assert_process_wide_overlap_refused(self, app1, app2, entered, release):
+        first_results = []
+        worker = Thread(
+            target=lambda: first_results.append(
+                app1.validate_details(private=False)
+            )
+        )
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(timeout=2.0))
+            second = app2.validate_details(private=False)
+            self.assertFalse(second.ok)
+            self.assertIs(second.error.code, ErrorCode.BUSY)
+        finally:
+            release.set()
+            worker.join(timeout=2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(first_results), 1)
+        self.assertTrue(first_results[0].ok)
+        self.assertTrue(app2.validate_details(private=False).ok)
+
+    def test_default_direct_facades_share_one_process_coordinator(self):
+        entered = Event()
+        release = Event()
+
+        class BlockingBackend(FakeBackend):
+            def validate_details(self, *, private):
+                entered.set()
+                if not release.wait(timeout=2.0):
+                    raise RuntimeError("test release timeout")
+                return super().validate_details(private=private)
+
+        app1 = ApplicationFacade(BlockingBackend(fake_baseline()))
+        app2 = ApplicationFacade(FakeBackend(fake_baseline()))
+        self._assert_process_wide_overlap_refused(app1, app2, entered, release)
+
+    def test_public_factory_facades_share_one_process_coordinator(self):
+        entered = Event()
+        release = Event()
+
+        class BlockingBackend(FakeBackend):
+            def validate_details(self, *, private):
+                entered.set()
+                if not release.wait(timeout=2.0):
+                    raise RuntimeError("test release timeout")
+                return super().validate_details(private=private)
+
+        first_backend = BlockingBackend(fake_baseline())
+        second_backend = FakeBackend(fake_baseline())
+        with patch(
+            "g502x_onboard.application.real_backend.RealBackend",
+            side_effect=[first_backend, second_backend],
+        ):
+            app1 = create_application()
+            app2 = create_application()
+
+        self._assert_process_wide_overlap_refused(app1, app2, entered, release)
+
     def test_coordinator_releases_after_backend_failure(self):
         class OneShotFailure(FakeBackend):
             failed = False
@@ -233,13 +294,14 @@ class Phase2ApplicationWorkflowTests(unittest.TestCase):
 
         backend = OneShotFailure(fake_baseline())
         app = ApplicationFacade(backend)
+        other = ApplicationFacade(FakeBackend(fake_baseline()))
         first = app.probe_details(
             pid=0xC547,
             index=1,
             read_sectors=False,
             private=False,
         )
-        second = app.probe_details(
+        second = other.probe_details(
             pid=0xC547,
             index=1,
             read_sectors=False,
@@ -249,13 +311,44 @@ class Phase2ApplicationWorkflowTests(unittest.TestCase):
         self.assertTrue(second.ok)
         self.assertEqual(backend.persistent_write_count, 0)
 
+    def test_cli_private_error_detail_requires_explicit_opt_in(self):
+        secret = "unit-id=SECRET-123 /private/baseline/profile"
+
+        class ExplodingBackend(FakeBackend):
+            def status(self, *, private):
+                del private
+                raise RuntimeError(secret)
+
+        result = ApplicationFacade(
+            ExplodingBackend(fake_baseline())
+        ).status(private=False)
+        self.assertFalse(result.ok)
+        self.assertIs(result.privacy, PrivacyClass.PRIVATE_DIAGNOSTIC)
+        self.assertEqual(result.error.message, "status failed")
+        self.assertEqual(result.error.detail, secret)
+
+        from g502x_onboard.cli import _app_value
+
+        with self.assertRaises(RuntimeError) as public_error:
+            _app_value(result)
+        self.assertEqual(str(public_error.exception), "status failed")
+        self.assertNotIn("SECRET-123", str(public_error.exception))
+
+        with self.assertRaises(RuntimeError) as private_error:
+            _app_value(result, expose_private_detail=True)
+        self.assertIn("PRIVATE diagnostic:", str(private_error.exception))
+        self.assertIn("SECRET-123", str(private_error.exception))
+
     def test_fake_backend_readonly_smoke_cannot_broaden_real_policy(self):
         cases = (
             {"architecture": "unknown"},
             {"transport": "untested"},
             {"stable_identity": False},
             {"write_allowed": False},
+            {"baseline_matches": False},
+            {"exact_unit_matches": False},
             {"host_guard_clear": False},
+            {"host_guard_recheck_clear": False},
             {"active_profile": 2},
             {"recovery_ok": False},
         )
@@ -269,6 +362,68 @@ class Phase2ApplicationWorkflowTests(unittest.TestCase):
                 )
                 self.assertFalse(result.ok)
                 self.assertEqual(backend.persistent_write_count, 0)
+
+        unsafe_label = self.app.readonly_smoke(
+            report_path="report.json",
+            label="../escape",
+        )
+        self.assertFalse(unsafe_label.ok)
+        self.assertEqual(self.backend.persistent_write_count, 0)
+
+    def test_fake_backend_hardware_paths_refuse_bound_target_mismatch(self):
+        for state in (
+            {"baseline_matches": False},
+            {"exact_unit_matches": False},
+        ):
+            with self.subTest(state=state):
+                backend = FakeBackend(fake_baseline(), **state)
+                app = ApplicationFacade(backend)
+                operations = (
+                    lambda: app.validate_details(private=False),
+                    lambda: app.status(private=False),
+                    lambda: app.inspect(private=False),
+                    lambda: app.create_backup("phase2"),
+                    lambda: app.report_device(include_state=True),
+                    lambda: app.debug_export(include_raw=False),
+                )
+                for operation in operations:
+                    result = operation()
+                    self.assertFalse(result.ok)
+                self.assertTrue(app.report_device(include_state=False).ok)
+                self.assertEqual(backend.persistent_write_count, 0)
+
+    def test_fake_backend_setup_preserves_real_readonly_preconditions(self):
+        for state in (
+            {"architecture": "unknown"},
+            {"host_guard_clear": False},
+            {"active_profile": 2},
+            {"validation_ok": False},
+        ):
+            with self.subTest(state=state):
+                backend = FakeBackend(fake_baseline(), **state)
+                result = ApplicationFacade(backend).setup_baseline(
+                    pid=0xC547,
+                    index=1,
+                    replace=False,
+                )
+                self.assertFalse(result.ok)
+                self.assertEqual(backend.persistent_write_count, 0)
+
+    def test_fake_probe_unknown_architecture_never_claims_deep_sector_reads(self):
+        backend = FakeBackend(fake_baseline(), architecture="unknown")
+        result = ApplicationFacade(backend).probe_details(
+            pid=0xC547,
+            index=1,
+            read_sectors=True,
+            private=False,
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            result.value.payload["read_scope"]["live_sectors"],
+            "skipped_unknown_architecture",
+        )
+        self.assertNotIn("sector_health", result.value.payload)
+        self.assertEqual(backend.persistent_write_count, 0)
 
     def test_fake_backend_public_report_check_uses_authoritative_validator(self):
         report = self.app.report_probe(pid=0xC547, index=1)

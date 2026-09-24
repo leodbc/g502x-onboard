@@ -93,6 +93,11 @@ class FakeBackend:
         if not self.active_baseline_binding or not self.exact_unit_binding:
             raise RuntimeError("exact-unit baseline binding is missing")
 
+    def _require_validated_target(self) -> None:
+        self._require_bound_target()
+        if not self._compatibility().write_allowed:
+            raise RuntimeError("device is read-only")
+
     def probe(self) -> ProbeSnapshot:
         self.read_history.append("probe")
         return ProbeSnapshot(
@@ -104,6 +109,7 @@ class FakeBackend:
 
     def validate(self) -> ValidationSnapshot:
         self.read_history.append("validate")
+        self._require_validated_target()
         ok = self._validation_passes()
         return ValidationSnapshot(
             ok=ok,
@@ -147,6 +153,8 @@ class FakeBackend:
         self.read_history.append("preparation-context")
         if not self.host_guard_clear:
             raise RuntimeError("host guard is not clear")
+        if not self.active_baseline_binding or not self.exact_unit_binding:
+            raise RuntimeError("preparation is missing its exact-unit binding")
 
         compatibility = self._preparation_compatibility()
         validation_ok = self._validation_passes()
@@ -176,6 +184,17 @@ class FakeBackend:
         pid = 0xC547 if pid is None else int(pid)
         index = 1 if index is None else int(index)
         compatibility = self._compatibility()
+        deep_read_allowed = self.architecture == "compatible"
+        live_scope = (
+            "read_all_16"
+            if read_sectors and deep_read_allowed
+            else (
+                "skipped_unknown_architecture"
+                if not deep_read_allowed
+                else "skipped_by_request"
+            )
+        )
+        oob_scope = "read" if deep_read_allowed else "skipped_unknown_architecture"
         payload = {
             "tool_version": "fake",
             "transport": {
@@ -203,13 +222,13 @@ class FakeBackend:
                 "sector_size": 255,
             },
             "read_scope": {
-                "live_sectors": "read_all_16" if read_sectors else "skipped_by_request",
-                "oob": "read",
+                "live_sectors": live_scope,
+                "oob": oob_scope,
                 "active_profile": "read",
             },
             "oob": {"directory": [], "page_count": 0, "pages_available": []},
         }
-        if read_sectors:
+        if read_sectors and deep_read_allowed:
             payload["sector_health"] = {
                 str(i): {"crc_ok": True, "health": "crc_valid", "erased": False}
                 for i in range(16)
@@ -224,6 +243,7 @@ class FakeBackend:
 
     def validate_details(self, *, private: bool) -> ValidationDetails:
         self.read_history.append("validate-details")
+        self._require_validated_target()
         ok = self._validation_passes()
         summary = {
             "ok": ok,
@@ -283,6 +303,7 @@ class FakeBackend:
 
     def inspect(self, *, private: bool) -> InspectSnapshot:
         self.read_history.append("inspect")
+        self._require_validated_target()
         if not self._validation_passes():
             raise RuntimeError("device state is invalid; run validate:\n  fake validation failure")
         return InspectSnapshot(
@@ -333,6 +354,14 @@ class FakeBackend:
     ) -> SetupSnapshot:
         del pid, index, replace
         self.read_history.append("setup-baseline")
+        if not self.host_guard_clear:
+            raise RuntimeError("Logitech configuration software must be closed")
+        if self.architecture != "compatible":
+            raise RuntimeError("device memory geometry is not compatible")
+        if self.active_profile != 1:
+            raise RuntimeError("Profile 1 SAFE must be active before setup")
+        if not self.validation_ok:
+            raise RuntimeError("setup state is structurally invalid")
         return SetupSnapshot(
             root="/private/fake-baseline",
             fingerprint=self.exact_unit_binding,
@@ -394,6 +423,7 @@ class FakeBackend:
 
         self.read_history.append("backup")
         label = normalize_private_component(label, context="checkpoint label")
+        self._require_validated_target()
         return BackupSnapshot(name=f"{label}-fake")
 
     def report_probe(
@@ -445,6 +475,7 @@ class FakeBackend:
 
     def debug_export(self, *, include_raw: bool) -> DebugExportSnapshot:
         self.read_history.append("debug-export")
+        self._require_validated_target()
         payload = {
             "format": "g502x-state-export-v1",
             "privacy": {
@@ -464,11 +495,11 @@ class FakeBackend:
         report_path: str,
         label: str,
     ) -> ReadonlySmokeSnapshot:
-        del label
         self.read_history.append("readonly-smoke")
         compatibility = self._compatibility()
         if not self.host_guard_clear:
             raise RuntimeError("read-only smoke requires host guard clear")
+        self._require_bound_target()
         if compatibility.architecture != "compatible":
             raise RuntimeError("read-only smoke requires compatible architecture")
         if compatibility.transport != "tested":
@@ -479,6 +510,17 @@ class FakeBackend:
             raise RuntimeError("read-only smoke requires Profile 1 SAFE")
         if not self._validation_passes():
             raise RuntimeError("read-only smoke requires valid recovery/device state")
+        recheck = (
+            self.host_guard_clear
+            if self.host_guard_recheck_clear is None
+            else self.host_guard_recheck_clear
+        )
+        if not recheck:
+            raise RuntimeError("Logitech configuration software became active")
+
+        from ..private_io import normalize_private_component
+
+        normalize_private_component(label, context="checkpoint label")
         return ReadonlySmokeSnapshot(
             report_name=str(report_path).rsplit("/", 1)[-1],
             checkpoint_name="fake-checkpoint",

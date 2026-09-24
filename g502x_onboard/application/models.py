@@ -40,6 +40,11 @@ class ApplicationError:
     code: ErrorCode
     message: str
     privacy: PrivacyClass
+    detail: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.detail is not None and self.privacy is PrivacyClass.SHAREABLE:
+            raise ValueError("shareable errors cannot carry private diagnostic detail")
 
 
 T = TypeVar("T")

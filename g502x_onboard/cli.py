@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import VERSION
-from .application import ErrorCode, create_application
+from .application import ErrorCode, PrivacyClass, create_application
 from .baseline import (
     DEFAULT_INDEX,
     DEFAULT_PID,
@@ -47,12 +47,20 @@ def _int_auto(value: str) -> int:
     return int(str(value), 0)
 
 
-def _app_value(result):
+def _app_value(result, *, expose_private_detail: bool = False):
     if result.ok:
         return result.value
     if result.error.code is ErrorCode.CONFIG_ERROR:
         raise ConfigError(result.error.message)
-    raise RuntimeError(result.error.message)
+
+    message = result.error.message
+    if (
+        expose_private_detail
+        and result.error.privacy is PrivacyClass.PRIVATE_DIAGNOSTIC
+        and result.error.detail
+    ):
+        message = f"PRIVATE diagnostic: {result.error.detail}"
+    raise RuntimeError(message)
 
 
 def _load_plan(path: str):
@@ -217,7 +225,8 @@ def cmd_probe(args):
             index=args.index,
             read_sectors=not args.no_sectors,
             private=bool(args.private or args.json),
-        )
+        ),
+        expose_private_detail=bool(args.private or args.json),
     )
     result = value.payload
 
@@ -347,7 +356,8 @@ def cmd_setup(args):
             pid=args.pid,
             index=args.index,
             replace=args.replace,
-        )
+        ),
+        expose_private_detail=args.private,
     )
     print()
     print("LOCAL DEVICE BASELINE READY.")
@@ -371,7 +381,10 @@ def cmd_setup(args):
 
 
 def cmd_baseline_list(args):
-    value = _app_value(create_application().list_baselines(private=args.private))
+    value = _app_value(
+        create_application().list_baselines(private=args.private),
+        expose_private_detail=args.private,
+    )
     rows = list(value.rows)
     if args.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
@@ -394,13 +407,19 @@ def cmd_baseline_list(args):
 
 
 def cmd_baseline_show(args):
-    value = _app_value(create_application().show_baseline(private=args.private))
+    value = _app_value(
+        create_application().show_baseline(private=args.private),
+        expose_private_detail=args.private,
+    )
     print(json.dumps(value.payload, indent=2, sort_keys=True, ensure_ascii=False))
 
 
 
 def cmd_baseline_use(args):
-    value = _app_value(create_application().use_baseline(args.fingerprint))
+    value = _app_value(
+        create_application().use_baseline(args.fingerprint),
+        expose_private_detail=args.private,
+    )
     if args.private:
         print(f"Active baseline: {value.root}")
     else:
@@ -564,7 +583,10 @@ def cmd_apply(args):
 
 
 def cmd_validate(args):
-    value = _app_value(create_application().validate_details(private=args.private))
+    value = _app_value(
+        create_application().validate_details(private=args.private),
+        expose_private_detail=args.private,
+    )
     if args.json:
         print(json.dumps(value.summary, indent=2, sort_keys=True))
     else:
@@ -583,7 +605,10 @@ def cmd_validate(args):
 
 
 def cmd_status(args):
-    value = _app_value(create_application().status(private=args.private))
+    value = _app_value(
+        create_application().status(private=args.private),
+        expose_private_detail=args.private,
+    )
     summary = value.summary
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
@@ -645,7 +670,10 @@ def cmd_status(args):
 
 
 def cmd_inspect(args):
-    value = _app_value(create_application().inspect(private=args.private))
+    value = _app_value(
+        create_application().inspect(private=args.private),
+        expose_private_detail=args.private,
+    )
     rows = list(value.rows)
     if args.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
@@ -687,7 +715,10 @@ def cmd_debug_export(args):
             "as base64."
         )
 
-    value = _app_value(create_application().debug_export(include_raw=args.raw))
+    value = _app_value(
+        create_application().debug_export(include_raw=args.raw),
+        expose_private_detail=True,
+    )
     payload = value.payload
 
     if args.path:

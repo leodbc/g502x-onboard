@@ -374,16 +374,28 @@ class ApplicationFacade:
             if expose_detail:
                 return self._failure(
                     ErrorCode.BACKEND_FAILURE,
-                    str(exc),
+                    failure_message,
                     PrivacyClass.PRIVATE_DIAGNOSTIC,
+                    detail=str(exc),
                 )
             return self._backend_failure(failure_message)
 
     @staticmethod
-    def _failure(code: ErrorCode, message: str, privacy: PrivacyClass) -> OperationResult:
+    def _failure(
+        code: ErrorCode,
+        message: str,
+        privacy: PrivacyClass,
+        *,
+        detail: str | None = None,
+    ) -> OperationResult:
         return OperationResult(
             ok=False,
-            error=ApplicationError(code=code, message=message, privacy=privacy),
+            error=ApplicationError(
+                code=code,
+                message=message,
+                privacy=privacy,
+                detail=detail,
+            ),
             privacy=privacy,
         )
 

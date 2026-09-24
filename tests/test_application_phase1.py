@@ -144,7 +144,7 @@ class ApplicationBoundaryTests(unittest.TestCase):
                     if alias.name.startswith("g502x_onboard.application"):
                         application_imports.append(alias.name)
         self.assertEqual(application_imports, ["application"])
-        self.assertEqual(imported_names, {"ErrorCode", "create_application"})
+        self.assertEqual(imported_names, {"ErrorCode", "PrivacyClass", "create_application"})
 
     def test_fake_backend_satisfies_protocol(self):
         self.assertIsInstance(FakeBackend(fake_baseline()), Backend)
