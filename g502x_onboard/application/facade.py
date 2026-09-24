@@ -4,6 +4,7 @@ import hashlib
 import uuid
 from pathlib import Path
 from typing import Callable
+from weakref import WeakKeyDictionary
 
 from ..codec import build_plan, plan_json, profile_display_metadata
 from ..config import ConfigError, load_config
@@ -27,20 +28,26 @@ from .models import (
 class ApplicationFacade:
     """Adapter-facing Phase-1 use cases; no direct persistent execution exists."""
 
+    __slots__ = ("_id_factory", "__weakref__")
+
     def __init__(self, backend: Backend, *, id_factory: Callable[[], str] | None = None) -> None:
-        self._backend = backend
+        # Do not retain the backend as facade instance state. A normal adapter
+        # receiving only the public facade must not be able to walk an obvious
+        # attribute path from the facade to RealBackend and its preserved
+        # persistent primitives.
+        _BACKENDS[self] = backend
         self._id_factory = id_factory or (lambda: uuid.uuid4().hex)
 
     def probe(self) -> OperationResult[ProbeSnapshot]:
         try:
-            value = self._backend.probe()
+            value = _BACKENDS[self].probe()
             return OperationResult(ok=True, value=value, privacy=value.privacy)
         except Exception:
             return self._backend_failure("probe failed")
 
     def validate(self) -> OperationResult[ValidationSnapshot]:
         try:
-            value = self._backend.validate()
+            value = _BACKENDS[self].validate()
             return OperationResult(ok=True, value=value, privacy=value.privacy)
         except Exception:
             return self._backend_failure("validation failed")
@@ -60,7 +67,7 @@ class ApplicationFacade:
                 PrivacyClass.SHAREABLE,
             )
         try:
-            active = self._backend.switch_profile_guarded(target)
+            active = _BACKENDS[self].switch_profile_guarded(target)
         except Exception:
             return self._backend_failure("profile switch refused or failed")
         value = ProfileSwitchResult(active_profile=active, confirmation_phrase=phrase)
@@ -69,7 +76,7 @@ class ApplicationFacade:
     def prepare_apply(self, config_path: str | Path) -> OperationResult[PreparedOperation]:
         """Prepare APPLY CONFIG against a backend snapshot without persistent writes."""
         try:
-            context = self._backend.preparation_context()
+            context = _BACKENDS[self].preparation_context()
         except Exception:
             return self._backend_failure("unable to observe preparation preconditions")
 
@@ -148,3 +155,6 @@ class ApplicationFacade:
         # The raw exception remains backend/private state. The adapter receives
         # only a classified, stable summary.
         return cls._failure(ErrorCode.BACKEND_FAILURE, message, PrivacyClass.PRIVATE_DIAGNOSTIC)
+
+
+_BACKENDS: WeakKeyDictionary[ApplicationFacade, Backend] = WeakKeyDictionary()
