@@ -18,11 +18,14 @@ from .models import (
     BaselineListSnapshot,
     BaselineShowSnapshot,
     BaselineUseSnapshot,
+    CancellationToken,
     CapacitySnapshot,
     DebugExportSnapshot,
     ErrorCode,
     InspectSnapshot,
     OperationResult,
+    PersistentExecutionResult,
+    PersistentPhaseSnapshot,
     PlanSnapshot,
     PersistentOperationKind,
     PreparedOperation,
@@ -38,6 +41,12 @@ from .models import (
     ValidationDetails,
     ValidationSnapshot,
     WriteEligibility,
+)
+from .persistent import (
+    execute_prepared as _execute_prepared,
+    prepare_apply as _prepare_apply,
+    prepare_restore_backup as _prepare_restore_backup,
+    prepare_restore_baseline as _prepare_restore_baseline,
 )
 
 
@@ -106,78 +115,51 @@ class ApplicationFacade:
         return OperationResult(ok=True, value=value, privacy=value.privacy)
 
     def prepare_apply(self, config_path: str | Path) -> OperationResult[PreparedOperation]:
-        """Prepare APPLY CONFIG against a backend snapshot without persistent writes."""
-        context_result = self._run_use_case(
-            lambda: _BACKENDS[self].preparation_context(),
-            failure_message="unable to observe preparation preconditions",
-            expose_detail=False,
-            coordinated=True,
+        return _prepare_apply(
+            self,
+            _BACKENDS[self],
+            _COORDINATORS[self],
+            self._id_factory,
+            config_path,
         )
-        if not context_result.ok:
-            return context_result
-        context = context_result.value
 
-        if context.compatibility.eligibility is not WriteEligibility.ELIGIBLE:
-            return self._failure(
-                ErrorCode.READ_ONLY,
-                "connected target is read-only; persistent preparation is refused",
-                PrivacyClass.SHAREABLE,
-            )
-        if not context.host_guard_clear:
-            return self._failure(
-                ErrorCode.SAFETY_REFUSAL,
-                "host guard is not clear",
-                PrivacyClass.SHAREABLE,
-            )
-
-        try:
-            path, config = load_config(config_path)
-            plan = build_plan(config, context.baseline_map())
-        except (ConfigError, OSError, ValueError) as exc:
-            # Config filenames/content are user-authored. Do not surface raw
-            # exception text as a default/shareable application error.
-            del exc
-            return self._failure(
-                ErrorCode.INVALID_INPUT,
-                "configuration could not be loaded or compiled",
-                PrivacyClass.LOCAL_SENSITIVE,
-            )
-        except Exception:
-            return self._backend_failure("configuration preparation failed")
-
-        rendered_plan = plan_json(plan).encode("utf-8")
-        digest = hashlib.sha256(rendered_plan).hexdigest()
-        profile_names = []
-        for profile in PROGRAMMABLE_PROFILES:
-            row = plan["profiles"][profile]
-            if row["disabled"]:
-                continue
-            profile_names.append(
-                (profile, str(profile_display_metadata(row["profile"])["name"]))
-            )
-
-        managed_sectors = (0, *PROGRAMMABLE_PROFILES, *GLOBAL_MACRO_SECTORS)
-        review = ApplyReview(
-            config_name=path.name,
-            enabled_profiles=tuple(int(p) for p in plan["enabled_profiles"]),
-            profile_names=tuple(profile_names),
-            managed_sectors=tuple(int(s) for s in managed_sectors),
-            warnings=tuple(str(w) for w in plan["warnings"]),
-            plan_digest=digest,
+    def prepare_restore_backup(
+        self,
+        backup_path: str | Path,
+    ) -> OperationResult[PreparedOperation]:
+        return _prepare_restore_backup(
+            self,
+            _BACKENDS[self],
+            _COORDINATORS[self],
+            self._id_factory,
+            backup_path,
         )
-        value = PreparedOperation(
-            preparation_id=self._id_factory(),
-            kind=PersistentOperationKind.APPLY_CONFIG,
-            review=review,
-            plan_digest=digest,
-            active_baseline_binding=context.active_baseline_binding,
-            exact_unit_binding=context.exact_unit_binding,
-            compatibility=context.compatibility,
-            observed_preconditions=context.observed_preconditions,
-            host_guard_clear=context.host_guard_clear,
-            required_confirmation_phrase="APPLY CONFIG",
+
+    def prepare_restore_baseline(self) -> OperationResult[PreparedOperation]:
+        return _prepare_restore_baseline(
+            self,
+            _BACKENDS[self],
+            _COORDINATORS[self],
+            self._id_factory,
         )
-        return OperationResult(ok=True, value=value, privacy=value.privacy)
+
+    def execute_prepared(
+        self,
+        prepared: PreparedOperation,
+        confirmation: str,
+        *,
+        cancellation: CancellationToken | None = None,
+        observer: Callable[[PersistentPhaseSnapshot], None] | None = None,
+    ) -> OperationResult[PersistentExecutionResult]:
+        return _execute_prepared(
+            self,
+            _BACKENDS[self],
+            _COORDINATORS[self],
+            prepared,
+            confirmation,
+            cancellation=cancellation,
+            observer=observer,
+        )
 
     def probe_details(
         self,
