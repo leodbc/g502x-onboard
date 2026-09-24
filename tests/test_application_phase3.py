@@ -24,9 +24,12 @@ from g502x_onboard.application import (
     WriteEligibility,
 )
 from g502x_onboard.application.backend import (
+    PersistentBackendFailure,
     PersistentBackendIntent,
+    PersistentBackendResult,
     PersistentTargetSnapshot,
 )
+from g502x_onboard.application.coordinator import OperationCoordinator
 from g502x_onboard.application.facade import ApplicationFacade
 from g502x_onboard.application.fake_backend import FakeBackend
 from g502x_onboard.codec import crc16_ccitt
@@ -438,6 +441,170 @@ class PreparedPersistentWorkflowTests(unittest.TestCase):
             observer=observer,
         )
         self.assertTrue(result.value.success)
+
+    def test_keyboard_interrupt_after_process_claim_releases_lock(self):
+        import g502x_onboard.application.persistent as persistent
+
+        backend = FakeBackend(fake_baseline())
+        coordinator = OperationCoordinator()
+        app = ApplicationFacade(
+            backend,
+            coordinator=coordinator,
+            id_factory=lambda: f"phase3-{next(_IDS)}",
+        )
+        prepared_result = app.prepare_apply(self.config)
+        self.assertTrue(prepared_result.ok, prepared_result.error)
+        prepared = prepared_result.value
+
+        class InterruptingRegistryLock:
+            def __init__(self, delegate):
+                self.delegate = delegate
+                self.entries = 0
+                self.held = False
+
+            def __enter__(self):
+                self.entries += 1
+                if self.entries == 2:
+                    raise KeyboardInterrupt
+                self.delegate.acquire()
+                self.held = True
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                del exc_type, exc, tb
+                if self.held:
+                    self.held = False
+                    self.delegate.release()
+                return False
+
+        interrupting = InterruptingRegistryLock(persistent._REGISTRY_LOCK)
+        with patch.object(persistent, "_REGISTRY_LOCK", interrupting):
+            with self.assertRaises(KeyboardInterrupt):
+                app.execute_prepared(prepared, "APPLY CONFIG")
+
+        # The interruption happened after the process claim was acquired but
+        # before the preparation was consumed.  The claim must already be
+        # released, and the same preparation must remain executable.
+        with coordinator.claim():
+            pass
+        retry = app.execute_prepared(prepared, "APPLY CONFIG")
+        self.assertTrue(retry.value.success)
+
+    def test_process_level_baseexceptions_propagate_and_release_claim(self):
+        for exc_type in (KeyboardInterrupt, SystemExit):
+            for phase in (
+                PersistentPhase.REVALIDATING,
+                PersistentPhase.ARMED,
+                PersistentPhase.WRITING,
+                PersistentPhase.POST_VALIDATING,
+            ):
+                with self.subTest(exc_type=exc_type.__name__, phase=phase):
+                    backend = FakeBackend(fake_baseline())
+                    coordinator = OperationCoordinator()
+                    app = ApplicationFacade(
+                        backend,
+                        coordinator=coordinator,
+                        id_factory=lambda: f"phase3-{next(_IDS)}",
+                    )
+                    prepared = app.prepare_apply(self.config).value
+
+                    def observer(state, phase=phase, exc_type=exc_type):
+                        if state.phase is phase:
+                            raise exc_type()
+
+                    with self.assertRaises(exc_type):
+                        app.execute_prepared(
+                            prepared,
+                            "APPLY CONFIG",
+                            observer=observer,
+                        )
+
+                    with coordinator.claim():
+                        pass
+
+                    retry = app.execute_prepared(prepared, "APPLY CONFIG")
+                    self.assertFalse(retry.value.success)
+                    self.assertIs(
+                        retry.value.error_code,
+                        ErrorCode.CONSUMED_PREPARATION,
+                    )
+
+    def test_application_rejects_incomplete_backend_success_evidence(self):
+        cases = (
+            (False, False, True),
+            (True, False, True),
+            (False, True, True),
+            (True, True, False),
+        )
+        for reconciled, post_validated, complete_lifecycle in cases:
+            with self.subTest(
+                reconciled=reconciled,
+                post_validated=post_validated,
+                complete_lifecycle=complete_lifecycle,
+            ):
+                backend, app, prepared = self.prepare_apply()
+
+                def inconsistent(_intent, _cancellation, phase_callback):
+                    phase_callback(PersistentPhase.ARMED)
+                    phase_callback(PersistentPhase.WRITING)
+                    phase_callback(PersistentPhase.RECONCILING)
+                    if complete_lifecycle:
+                        phase_callback(PersistentPhase.POST_VALIDATING)
+                    return PersistentBackendResult(
+                        enabled_profiles=(1, 2),
+                        safety_backup_name="synthetic-safety",
+                        reconciliation_completed=reconciled,
+                        post_validation_completed=post_validated,
+                    )
+
+                with patch.object(
+                    backend,
+                    "execute_persistent",
+                    side_effect=inconsistent,
+                ):
+                    result = app.execute_prepared(prepared, "APPLY CONFIG")
+
+                self.assertFalse(result.value.success)
+                self.assertIs(
+                    result.value.terminal_phase,
+                    PersistentPhase.FAILED,
+                )
+                self.assertIs(
+                    result.value.error_code,
+                    ErrorCode.BACKEND_FAILURE,
+                )
+                self.assertEqual(
+                    result.value.reconciliation_completed,
+                    bool(reconciled),
+                )
+                self.assertEqual(
+                    result.value.post_validation_completed,
+                    bool(post_validated and reconciled),
+                )
+
+    def test_contradictory_backend_failure_evidence_is_normalized(self):
+        backend, app, prepared = self.prepare_apply()
+
+        def contradictory(_intent, _cancellation, phase_callback):
+            phase_callback(PersistentPhase.ARMED)
+            phase_callback(PersistentPhase.WRITING)
+            raise PersistentBackendFailure(
+                "synthetic contradictory failure",
+                reconciliation_completed=False,
+                post_validation_completed=True,
+            )
+
+        with patch.object(
+            backend,
+            "execute_persistent",
+            side_effect=contradictory,
+        ):
+            result = app.execute_prepared(prepared, "APPLY CONFIG")
+
+        self.assertFalse(result.value.success)
+        self.assertTrue(result.value.writing_started)
+        self.assertFalse(result.value.reconciliation_completed)
+        self.assertFalse(result.value.post_validation_completed)
 
     def test_first_write_boundary_and_failure_classification(self):
         backend, app, prepared = self.prepare_apply()
