@@ -385,11 +385,15 @@ class FakeBackend:
 
     def use_baseline(self, fingerprint: str) -> BaselineUseSnapshot:
         self.read_history.append("baseline-use")
-        self.active_baseline_binding = fingerprint
+        if fingerprint != self.active_baseline_binding:
+            raise RuntimeError("unknown baseline")
         return BaselineUseSnapshot(root="/private/fake-baseline")
 
     def create_backup(self, label: str) -> BackupSnapshot:
+        from ..private_io import normalize_private_component
+
         self.read_history.append("backup")
+        label = normalize_private_component(label, context="checkpoint label")
         return BackupSnapshot(name=f"{label}-fake")
 
     def report_probe(
@@ -405,8 +409,11 @@ class FakeBackend:
             read_sectors=True,
             private=False,
         )
+        from ..baseline import assert_public_report_safe
+
         payload = dict(details.payload)
         payload["format"] = "g502x-probe-report-v1"
+        assert_public_report_safe(payload)
         return PublicReportSnapshot(payload=payload)
 
     def report_device(self, *, include_state: bool) -> PublicReportSnapshot:
@@ -423,10 +430,17 @@ class FakeBackend:
         }
         if include_state:
             payload["current_state"] = self.validate_details(private=False).summary
+
+        from ..baseline import assert_public_report_safe
+
+        assert_public_report_safe(payload)
         return PublicReportSnapshot(payload=payload)
 
     def check_public_report(self, payload: dict) -> ReportCheckResult:
+        from ..baseline import assert_public_report_safe
+
         self.read_history.append("report-check")
+        assert_public_report_safe(payload)
         return ReportCheckResult(format=str(payload["format"]))
 
     def debug_export(self, *, include_raw: bool) -> DebugExportSnapshot:
@@ -452,6 +466,19 @@ class FakeBackend:
     ) -> ReadonlySmokeSnapshot:
         del label
         self.read_history.append("readonly-smoke")
+        compatibility = self._compatibility()
+        if not self.host_guard_clear:
+            raise RuntimeError("read-only smoke requires host guard clear")
+        if compatibility.architecture != "compatible":
+            raise RuntimeError("read-only smoke requires compatible architecture")
+        if compatibility.transport != "tested":
+            raise RuntimeError("read-only smoke requires the tested transport")
+        if not compatibility.write_allowed:
+            raise RuntimeError("read-only smoke requires write-authorized exact unit")
+        if self.active_profile != 1:
+            raise RuntimeError("read-only smoke requires Profile 1 SAFE")
+        if not self._validation_passes():
+            raise RuntimeError("read-only smoke requires valid recovery/device state")
         return ReadonlySmokeSnapshot(
             report_name=str(report_path).rsplit("/", 1)[-1],
             checkpoint_name="fake-checkpoint",
