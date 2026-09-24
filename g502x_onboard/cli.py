@@ -11,6 +11,7 @@ from .application import ErrorCode, create_application
 from .baseline import (
     DEFAULT_INDEX,
     DEFAULT_PID,
+    HOME as STATE_HOME,
     active_manifest,
 )
 from .codec import (
