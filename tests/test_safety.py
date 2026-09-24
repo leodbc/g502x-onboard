@@ -167,36 +167,26 @@ class ProbeCliPrivacyTests(unittest.TestCase):
         self.assertEqual(args.path, "debug.json")
         self.assertTrue(args.allow_repo_output)
 
-    def test_readonly_smoke_reaches_operation_lock_without_device_validator_import(self):
+    def test_readonly_smoke_enters_public_application_facade(self):
         from g502x_onboard.cli import cmd_smoke_readonly
 
-        class StopBeforeHardware(Exception):
+        class StopAtFacade(Exception):
             pass
 
-        def stop_before_hardware(_lock_path):
-            raise StopBeforeHardware
-
-        fake_device = ModuleType("g502x_onboard.device")
-        for name in (
-            "assert_active_device_matches_baseline",
-            "create_backup",
-            "load_backup",
-            "probe_device",
-            "require_ghub_closed",
-        ):
-            setattr(fake_device, name, lambda *args, **kwargs: None)
+        class FakeApplication:
+            def readonly_smoke(self, **_kwargs):
+                raise StopAtFacade
 
         args = SimpleNamespace(
             report="device-report-smoke.json",
             label="release-smoke",
         )
-        with patch.dict(sys.modules, {"g502x_onboard.device": fake_device}):
-            with patch(
-                "g502x_onboard.cli.exclusive_operation_lock",
-                side_effect=stop_before_hardware,
-            ):
-                with self.assertRaises(StopBeforeHardware):
-                    cmd_smoke_readonly(args)
+        with patch(
+            "g502x_onboard.cli.create_application",
+            return_value=FakeApplication(),
+        ):
+            with self.assertRaises(StopAtFacade):
+                cmd_smoke_readonly(args)
 
 class DeviceProbeDependencyTests(unittest.TestCase):
     def test_device_probe_imports_probe_read_policy_from_baseline(self):

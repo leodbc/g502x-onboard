@@ -126,20 +126,25 @@ class ApplicationBoundaryTests(unittest.TestCase):
         self.assertNotIn("RealBackend", vars(composition))
         self.assertFalse(hasattr(app, "_backend"))
 
-    def test_current_cli_does_not_import_application_layer(self):
+    def test_phase2_cli_imports_only_public_application_surface(self):
         source = (ROOT / "g502x_onboard" / "cli.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         application_imports = []
+        imported_names = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
-                if module == "application" or module.startswith("application."):
+                if module == "application":
+                    application_imports.append(module)
+                    imported_names.update(alias.name for alias in node.names)
+                elif module.startswith("application."):
                     application_imports.append(module)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.startswith("g502x_onboard.application"):
                         application_imports.append(alias.name)
-        self.assertEqual(application_imports, [])
+        self.assertEqual(application_imports, ["application"])
+        self.assertEqual(imported_names, {"ErrorCode", "PrivacyClass", "create_application"})
 
     def test_fake_backend_satisfies_protocol(self):
         self.assertIsInstance(FakeBackend(fake_baseline()), Backend)

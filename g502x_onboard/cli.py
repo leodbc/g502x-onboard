@@ -7,16 +7,12 @@ import sys
 from pathlib import Path
 
 from . import VERSION
+from .application import ErrorCode, PrivacyClass, create_application
 from .baseline import (
     DEFAULT_INDEX,
     DEFAULT_PID,
     HOME as STATE_HOME,
-    activate,
     active_manifest,
-    assert_public_report_safe,
-    list_baselines,
-    public_manifest,
-    public_probe_report,
 )
 from .codec import (
     build_plan,
@@ -40,13 +36,7 @@ from .constants import (
 )
 from .storage import ROOT, baseline_map
 from .private_io import atomic_local_write_text, exclusive_operation_lock, private_mkdir, private_write_text
-from .validator import (
-    export_state,
-    inspect_rows,
-    public_state_summary,
-    state_summary,
-    validate_device,
-)
+from .validator import validate_device
 
 
 SCHEMA_PATH = ROOT / "g502x_onboard" / "config.schema.json"
@@ -55,6 +45,22 @@ OPERATION_LOCK = STATE_HOME / "operation.lock"
 
 def _int_auto(value: str) -> int:
     return int(str(value), 0)
+
+
+def _app_value(result, *, expose_private_detail: bool = False):
+    if result.ok:
+        return result.value
+    if result.error.code is ErrorCode.CONFIG_ERROR:
+        raise ConfigError(result.error.message)
+
+    message = result.error.message
+    if (
+        expose_private_detail
+        and result.error.privacy is PrivacyClass.PRIVATE_DIAGNOSTIC
+        and result.error.detail
+    ):
+        message = f"PRIVATE diagnostic: {result.error.detail}"
+    raise RuntimeError(message)
 
 
 def _load_plan(path: str):
@@ -211,15 +217,19 @@ def cmd_schema(args):
         print(SCHEMA_PATH.read_text(encoding="utf-8"), end="")
 
 
-def cmd_probe(args):
-    from .device import probe_device
 
-    with exclusive_operation_lock(OPERATION_LOCK):
-        result = probe_device(
+def cmd_probe(args):
+    value = _app_value(
+        create_application().probe_details(
             pid=args.pid,
             index=args.index,
             read_sectors=not args.no_sectors,
-        )
+            private=bool(args.private or args.json),
+        ),
+        expose_private_detail=bool(args.private or args.json),
+    )
+    result = value.payload
+
     if args.json and args.private:
         raise ValueError("probe --json is already private; do not combine with --private")
     if args.json:
@@ -253,8 +263,8 @@ def cmd_probe(args):
         f"write_allowed={result['compatibility']['write_allowed']}"
     )
     print("Descriptor:")
-    for key, value in result["descriptor"].items():
-        print(f"  {key}: {value}")
+    for key, item in result["descriptor"].items():
+        print(f"  {key}: {item}")
     firmware = result["device"].get("firmware") or []
     if firmware:
         print("Firmware entities:")
@@ -272,7 +282,11 @@ def cmd_probe(args):
             f"oob={scope.get('oob')} "
             f"active_profile={scope.get('active_profile')}"
         )
-    if "sectors" in result:
+
+    sector_rows = result.get("sectors")
+    if sector_rows is None:
+        sector_rows = result.get("sector_health")
+    if sector_rows:
         def _health(row):
             return row.get(
                 "health",
@@ -281,15 +295,15 @@ def cmd_probe(args):
 
         invalid = [
             sector
-            for sector, row in result["sectors"].items()
+            for sector, row in sector_rows.items()
             if _health(row) == "invalid"
         ]
         erased = [
             sector
-            for sector, row in result["sectors"].items()
+            for sector, row in sector_rows.items()
             if _health(row) == "erased"
         ]
-        count = len(result["sectors"])
+        count = len(sector_rows)
         prefix = "" if count == SECTOR_COUNT else f"partial {count}/{SECTOR_COUNT}; "
         if invalid:
             summary = prefix + "INVALID: " + ", ".join(invalid)
@@ -305,21 +319,15 @@ def cmd_probe(args):
     print("READ ONLY. Nothing was written and no baseline was changed.")
 
 
-def cmd_report_probe(args):
-    from .device import probe_device
 
-    with exclusive_operation_lock(OPERATION_LOCK):
-        result = probe_device(
-            pid=args.pid,
-            index=args.index,
-            read_sectors=True,
-        )
-    report = public_probe_report(result)
-    assert_public_report_safe(report)
+def cmd_report_probe(args):
+    value = _app_value(
+        create_application().report_probe(pid=args.pid, index=args.index)
+    )
     out = Path(args.path).resolve()
     atomic_local_write_text(
         out,
-        json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        json.dumps(value.payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
     )
     print(f"Shareable probe report: {out.name}")
     print(
@@ -328,9 +336,8 @@ def cmd_report_probe(args):
     )
 
 
-def cmd_setup(args):
-    from .device import setup_device
 
+def cmd_setup(args):
     print("SETUP IS READ-ONLY TO THE MOUSE.")
     print("Profile 1 SAFE must already be active.")
     print(
@@ -344,48 +351,43 @@ def cmd_setup(args):
             print("Cancelled.")
             return
 
-    with exclusive_operation_lock(OPERATION_LOCK):
-        root, manifest = setup_device(
+    value = _app_value(
+        create_application().setup_baseline(
             pid=args.pid,
             index=args.index,
             replace=args.replace,
-        )
+        ),
+        expose_private_detail=args.private,
+    )
     print()
     print("LOCAL DEVICE BASELINE READY.")
     if args.private:
-        print(f"Path: {root}")
-        print(f"Fingerprint: {manifest['fingerprint']}")
+        print(f"Path: {value.root}")
+        print(f"Fingerprint: {value.fingerprint}")
     else:
         print("Identity: unit-bound / redacted")
         print("Storage: private G502X_HOME baseline")
-    compat = manifest["compatibility"]
     print(
-        f"Architecture: {compat['architecture']}  "
-        f"Transport: {compat['transport']}  "
-        f"Writes enabled: {compat['write_allowed']}"
+        f"Architecture: {value.architecture}  "
+        f"Transport: {value.transport}  "
+        f"Writes enabled: {value.write_allowed}"
     )
-    if not compat["write_allowed"]:
+    if not value.write_allowed:
         print(
             "This baseline is read-only for now. Create a shareable device report "
             "before enabling writes on an untested transport."
         )
 
 
+
 def cmd_baseline_list(args):
-    rows = list_baselines()
+    value = _app_value(
+        create_application().list_baselines(private=args.private),
+        expose_private_detail=args.private,
+    )
+    rows = list(value.rows)
     if args.json:
-        if args.private:
-            payload = rows
-        else:
-            payload = [
-                {
-                    key: value
-                    for key, value in row.items()
-                    if key != "fingerprint"
-                }
-                for row in rows
-            ]
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        print(json.dumps(rows, indent=2, sort_keys=True))
         return
     if not rows:
         print("No local baselines. Run setup first.")
@@ -393,7 +395,7 @@ def cmd_baseline_list(args):
     for row in rows:
         marker = "*" if row["active"] else " "
         transport = row.get("transport") or {}
-        identity = row["fingerprint"] if args.private else "<redacted>"
+        identity = row.get("fingerprint", "<redacted>")
         print(
             f"{marker} {identity} "
             f"{row.get('device_name') or '?'} "
@@ -402,48 +404,47 @@ def cmd_baseline_list(args):
             f"{row.get('compatibility', {}).get('transport')}"
         )
 
+
+
 def cmd_baseline_show(args):
-    manifest = active_manifest()
-    output = manifest if args.private else public_manifest(manifest)
-    print(json.dumps(output, indent=2, sort_keys=True, ensure_ascii=False))
+    value = _app_value(
+        create_application().show_baseline(private=args.private),
+        expose_private_detail=args.private,
+    )
+    print(json.dumps(value.payload, indent=2, sort_keys=True, ensure_ascii=False))
+
 
 
 def cmd_baseline_use(args):
-    with exclusive_operation_lock(OPERATION_LOCK):
-        root = activate(args.fingerprint)
+    value = _app_value(
+        create_application().use_baseline(args.fingerprint),
+        expose_private_detail=args.private,
+    )
     if args.private:
-        print(f"Active baseline: {root}")
+        print(f"Active baseline: {value.root}")
     else:
         print("Active baseline switched in private local state.")
+
 
 
 def cmd_report_check(args):
     path = Path(args.path).resolve()
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert_public_report_safe(payload)
+    value = _app_value(create_application().check_public_report(payload))
     print("PUBLIC REPORT CHECK: PASS")
-    print(f"Format: {payload['format']}")
+    print(f"Format: {value.format}")
     print(f"File: {path.name}")
 
 
-def cmd_report_device(args):
-    if args.state:
-        with exclusive_operation_lock(OPERATION_LOCK):
-            manifest = active_manifest()
-            images, validation = validate_device()
-            report = public_manifest(manifest)
-            report["current_state"] = public_state_summary(
-                images,
-                validation,
-            )
-    else:
-        report = public_manifest(active_manifest())
 
-    assert_public_report_safe(report)
+def cmd_report_device(args):
+    value = _app_value(
+        create_application().report_device(include_state=args.state)
+    )
     out = Path(args.path).resolve()
     atomic_local_write_text(
         out,
-        json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        json.dumps(value.payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
     )
     print(f"Shareable device report: {out.name}")
     print(
@@ -451,121 +452,15 @@ def cmd_report_device(args):
         "raw sectors, or user profile names are included."
     )
 
+
+
 def cmd_smoke_readonly(args):
-    from .device import (
-        assert_active_device_matches_baseline,
-        create_backup,
-        load_backup,
-        probe_device,
-        require_ghub_closed,
+    value = _app_value(
+        create_application().readonly_smoke(
+            report_path=str(Path(args.report).resolve()),
+            label=args.label,
+        )
     )
-
-    out = Path(args.report).resolve()
-    with exclusive_operation_lock(OPERATION_LOCK):
-        require_ghub_closed()
-        manifest = assert_active_device_matches_baseline()
-
-        probe = probe_device(
-            pid=int(manifest["transport"]["pid"]),
-            index=int(manifest["transport"]["index"]),
-            read_sectors=True,
-        )
-        probe_report = public_probe_report(probe)
-        assert_public_report_safe(probe_report)
-
-        compat = probe_report.get("compatibility") or {}
-        scope = probe_report.get("read_scope") or {}
-        if compat.get("architecture") != "compatible":
-            raise RuntimeError(
-                "read-only smoke requires compatible architecture"
-            )
-        if compat.get("transport") != "tested":
-            raise RuntimeError(
-                "read-only smoke requires the tested transport"
-            )
-        if compat.get("write_allowed") is not True:
-            raise RuntimeError(
-                "read-only smoke requires the exact unit/firmware write policy "
-                "to remain authorized before release freeze"
-            )
-        if scope.get("live_sectors") != "read_all_16":
-            raise RuntimeError(
-                "read-only smoke requires a complete 16-sector probe; "
-                f"got {scope.get('live_sectors')!r}"
-            )
-
-        health = probe_report.get("sector_health") or {}
-        if len(health) != SECTOR_COUNT:
-            raise RuntimeError(
-                "read-only smoke probe did not report all 16 sector health rows"
-            )
-        invalid = [
-            sector
-            for sector, row in health.items()
-            if (row or {}).get("health") == "invalid"
-        ]
-        if invalid:
-            raise RuntimeError(
-                "read-only smoke probe found invalid sector(s): "
-                + ", ".join(map(str, invalid))
-            )
-        if probe_report.get("active_profile") != SAFE_PROFILE:
-            raise RuntimeError(
-                "read-only smoke requires Profile 1 SAFE to already be active; "
-                "no automatic profile switch is performed by this gate"
-            )
-
-        # Re-check the external host interlock and exact unit between physical
-        # snapshots. The OS lock only serializes g502x processes; it cannot
-        # prevent G HUB from starting or the physical mouse from being swapped.
-        require_ghub_closed()
-        manifest = assert_active_device_matches_baseline()
-        images, validation = validate_device()
-        if not validation.ok:
-            raise RuntimeError(
-                "read-only smoke validate failed:\n  "
-                + "\n  ".join(validation.errors)
-            )
-
-        require_ghub_closed()
-        manifest = assert_active_device_matches_baseline()
-        checkpoint = create_backup(
-            args.label,
-            manifest=manifest,
-        )
-        _checkpoint_root, checkpoint_images, _checkpoint_manifest = load_backup(
-            checkpoint
-        )
-        if checkpoint_images != images:
-            raise RuntimeError(
-                "read-only smoke checkpoint does not exactly match the "
-                "validated sector snapshot"
-            )
-
-        report = public_manifest(manifest)
-        report["current_state"] = public_state_summary(
-            images,
-            validation,
-        )
-        assert_public_report_safe(report)
-        atomic_local_write_text(
-            out,
-            json.dumps(
-                report,
-                indent=2,
-                sort_keys=True,
-                ensure_ascii=False,
-            )
-            + "\n",
-        )
-
-        # Parse the emitted artifact again from disk. This intentionally checks
-        # the actual file handed to a maintainer, not only the in-memory object.
-        emitted = json.loads(out.read_text(encoding="utf-8"))
-        assert_public_report_safe(emitted)
-
-    compat = probe_report.get("compatibility") or {}
-    descriptor = probe_report.get("descriptor") or {}
     print(f"G502 X - READ-ONLY SMOKE {VERSION}")
     print("=" * 40)
     print("Result: PASS")
@@ -574,38 +469,36 @@ def cmd_smoke_readonly(args):
     print("Identity: unit-bound / redacted")
     print(
         "Compatibility: "
-        f"architecture={compat.get('architecture')} "
-        f"transport={compat.get('transport')}"
+        f"architecture={value.architecture} "
+        f"transport={value.transport}"
     )
     print(
         "Descriptor: "
-        f"profile_format={descriptor.get('profile_format')} "
-        f"macro_format={descriptor.get('macro_format')} "
-        f"sectors={descriptor.get('sector_count')}x"
-        f"{descriptor.get('sector_size')}"
+        f"profile_format={value.profile_format} "
+        f"macro_format={value.macro_format} "
+        f"sectors={value.sector_count}x{value.sector_size}"
     )
     print(
         "Validation: PASS; "
-        f"enabled={','.join(map(str, validation.enabled_profiles)) or '-'}; "
-        f"macro_starts={len(validation.macro_starts)}"
+        f"enabled={','.join(map(str, value.enabled_profiles)) or '-'}; "
+        f"macro_starts={value.macro_starts}"
     )
     print("Sector health: no invalid sectors")
-    print(f"Checkpoint: {checkpoint.name} (private state)")
+    print(f"Checkpoint: {value.checkpoint_name} (private state)")
     print("Checkpoint equality: PASS")
-    print(f"Shareable device report: {out.name}")
+    print(f"Shareable device report: {value.report_name}")
     print("Report privacy check: PASS")
 
 
+
 def cmd_plan(args):
-    with exclusive_operation_lock(OPERATION_LOCK):
-        path, _config, plan = _load_plan(args.config)
+    value = _app_value(create_application().plan(args.config))
     if args.json:
-        rendered = plan_json(plan)
         if args.json == "-":
-            print(rendered, end="")
+            print(value.rendered_json, end="")
         else:
             out = Path(args.json).resolve()
-            atomic_local_write_text(out, rendered)
+            atomic_local_write_text(out, value.rendered_json)
             print(f"Plan JSON: {out.name}")
             print(
                 "Plan JSON is local configuration output and may contain "
@@ -613,9 +506,10 @@ def cmd_plan(args):
                 "privacy-minimized shareable report."
             )
     else:
-        _print_plan(path, plan)
+        _print_plan(Path(value.config_path), value.plan)
     print()
     print("DRY RUN. No device writes performed.")
+
 
 
 def cmd_capacity(args):
@@ -624,16 +518,15 @@ def cmd_capacity(args):
         f"Global store: {GLOBAL_RAW_CAPACITY} raw / "
         f"{GLOBAL_PAYLOAD_CAPACITY} VM payload bytes"
     )
+    value = _app_value(create_application().capacity(args.config))
     if args.config:
-        path, _config, plan = _load_plan(args.config)
-        store = plan["global_store"]
-        print(f"Config: {path}")
-        print(f"Source bytes:    {store['source_bytes']}")
-        print(f"Allocated bytes: {store['allocated_bytes']}")
-        print(f"JUMP overhead:   {store['jump_overhead']}")
-        print(f"Fragmentation:   {store['fragmentation_waste']}")
-        print(f"Raw free:        {store['raw_free_bytes']}")
-        print(f"Usable free:     {store['usable_free_bytes']}")
+        print(f"Config: {value.config_path}")
+        print(f"Source bytes:    {value.source_bytes}")
+        print(f"Allocated bytes: {value.allocated_bytes}")
+        print(f"JUMP overhead:   {value.jump_overhead}")
+        print(f"Fragmentation:   {value.fragmentation_waste}")
+        print(f"Raw free:        {value.raw_free_bytes}")
+        print(f"Usable free:     {value.usable_free_bytes}")
 
 
 def cmd_apply(args):
@@ -688,61 +581,44 @@ def cmd_apply(args):
     print(f"Pre-apply backup: {backup.name} (private state)")
     print("Profile 1 SAFE remained active.")
 
+
 def cmd_validate(args):
-    with exclusive_operation_lock(OPERATION_LOCK):
-        images, report = validate_device()
+    value = _app_value(
+        create_application().validate_details(private=args.private),
+        expose_private_detail=args.private,
+    )
     if args.json:
-        summary = (
-            state_summary(images, report)
-            if args.private
-            else public_state_summary(images, report)
-        )
-        print(json.dumps(summary, indent=2, sort_keys=True))
+        print(json.dumps(value.summary, indent=2, sort_keys=True))
     else:
         print(f"G502 X - VALIDATE {VERSION}")
         print("=" * 40)
-        print("Result:", "PASS" if report.ok else "FAIL")
-        print("Enabled: " + ", ".join(map(str, report.enabled_profiles)))
-        print(f"Referenced macro starts: {len(report.macro_starts)}")
-        for warning in report.warnings:
+        print("Result:", "PASS" if value.ok else "FAIL")
+        print("Enabled: " + ", ".join(map(str, value.enabled_profiles)))
+        print(f"Referenced macro starts: {value.referenced_macro_starts}")
+        for warning in value.warnings:
             print("WARNING:", warning)
-        for error in report.errors:
+        for error in value.errors:
             print("ERROR:", error)
-    if not report.ok:
+    if not value.ok:
         raise SystemExit(1)
 
 
+
 def cmd_status(args):
-    from .device import (
-        assert_active_device_matches_baseline,
-        connect_manifest_unit,
-        get_current_profile,
-        get_descriptor,
+    value = _app_value(
+        create_application().status(private=args.private),
+        expose_private_detail=args.private,
     )
-
-    with exclusive_operation_lock(OPERATION_LOCK):
-        manifest = assert_active_device_matches_baseline()
-        images, report = validate_device()
-        summary = (
-            state_summary(images, report)
-            if args.private
-            else public_state_summary(images, report)
-        )
-
-        dev = connect_manifest_unit(manifest)
-        try:
-            desc = get_descriptor(dev)
-            active = get_current_profile(dev)
-        finally:
-            dev.close()
+    summary = value.summary
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
         return
 
+    desc = value.descriptor
     print("G502 X LIGHTSPEED")
     print("=" * 40)
     print(f"Tool version: {VERSION}")
-    print(f"Active profile: {active}")
+    print(f"Active profile: {value.active_profile}")
     print(f"Profile format: {desc['profile_format']}")
     print(f"Macro format: {desc['macro_format']}")
     print(
@@ -756,7 +632,7 @@ def cmd_status(args):
             f"  sector {sector:02d}: "
             f"{'OK' if summary['recovery'][str(sector)] else 'CHANGED'}"
         )
-    print("  enabled: " + ", ".join(map(str, report.enabled_profiles)))
+    print("  enabled: " + ", ".join(map(str, value.enabled_profiles)))
     print()
     print("PROFILES")
     for profile in PROGRAMMABLE_PROFILES:
@@ -789,40 +665,23 @@ def cmd_status(args):
             f"high-water={row['high_water']:3d}/{PAGE_DATA_SIZE}"
         )
     print()
-    print("Structural validation:", "PASS" if report.ok else "FAIL")
+    print("Structural validation:", "PASS" if summary["ok"] else "FAIL")
+
 
 
 def cmd_inspect(args):
-    with exclusive_operation_lock(OPERATION_LOCK):
-        images, report = validate_device()
-    if not report.ok:
-        raise RuntimeError(
-            "device state is invalid; run validate:\n  "
-            + "\n  ".join(report.errors)
-        )
-    rows = inspect_rows(images, report)
-    if not args.private:
-        rows = [
-            {
-                **row,
-                "instructions": [
-                    {
-                        key: value
-                        for key, value in ins.items()
-                        if key != "description"
-                    }
-                    for ins in row["instructions"]
-                ],
-            }
-            for row in rows
-        ]
+    value = _app_value(
+        create_application().inspect(private=args.private),
+        expose_private_detail=args.private,
+    )
+    rows = list(value.rows)
     if args.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
         return
 
     print(f"G502 X - INSPECT {VERSION}")
     print("=" * 40)
-    print("Enabled: " + ", ".join(map(str, report.enabled_profiles)))
+    print("Enabled: " + ", ".join(map(str, value.enabled_profiles)))
     print(f"Macro starts referenced: {len(rows)}")
     print()
     for row in rows:
@@ -844,6 +703,7 @@ def cmd_inspect(args):
         print()
 
 
+
 def cmd_debug_export(args):
     print(
         "PRIVATE DIAGNOSTIC EXPORT. Do not attach this file to a public issue; "
@@ -855,13 +715,11 @@ def cmd_debug_export(args):
             "as base64."
         )
 
-    with exclusive_operation_lock(OPERATION_LOCK):
-        images, report = validate_device()
-        payload = export_state(
-            images,
-            report=report,
-            include_raw=args.raw,
-        )
+    value = _app_value(
+        create_application().debug_export(include_raw=args.raw),
+        expose_private_detail=True,
+    )
+    payload = value.payload
 
     if args.path:
         out = Path(args.path).expanduser().resolve()
@@ -883,7 +741,7 @@ def cmd_debug_export(args):
         )
         location = out.name
     else:
-        export_dir = private_mkdir(STATE_HOME / "exports")
+        export_dir = private_mkdir(Path(value.default_directory))
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         out = export_dir / f"debug-export-{stamp}.json"
         private_write_text(
@@ -897,15 +755,9 @@ def cmd_debug_export(args):
     if args.raw:
         print("Raw sectors included: this file may contain device-specific state.")
 
-def cmd_profile(args):
-    from .device import (
-        assert_active_device_matches_baseline,
-        connect_manifest_unit,
-        require_ghub_closed,
-        switch_profile,
-        validate_recovery,
-    )
 
+
+def cmd_profile(args):
     raw = str(args.target).lower()
     target = SAFE_PROFILE if raw == "safe" else int(raw)
     if target not in (1, 2, 3, 4, 5):
@@ -920,37 +772,13 @@ def cmd_profile(args):
         print("Cancelled.")
         return
 
-    with exclusive_operation_lock(OPERATION_LOCK):
-        require_ghub_closed()
-        manifest = assert_active_device_matches_baseline()
+    _app_value(create_application().switch_profile(target, phrase))
 
-        if target == SAFE_PROFILE:
-            validate_recovery()
-        else:
-            _images, report = validate_device()
-            if not report.ok:
-                raise RuntimeError(
-                    "refusing programmable profile switch because validate failed:\n  "
-                    + "\n  ".join(report.errors)
-                )
-            if target not in report.enabled_profiles:
-                raise RuntimeError(f"Profile {target} is disabled")
 
-        # The confirmation prompt is a race boundary: after it, all checks and
-        # the volatile switch run under the same per-user hardware lock.
-        require_ghub_closed()
-        dev = connect_manifest_unit(manifest)
-        try:
-            switch_profile(dev, target)
-        finally:
-            dev.close()
 
 def cmd_backup(args):
-    from .device import create_backup
-
-    with exclusive_operation_lock(OPERATION_LOCK):
-        out = create_backup(args.label)
-    print(f"Backup created in private state: {out.name}")
+    value = _app_value(create_application().create_backup(args.label))
+    print(f"Backup created in private state: {value.name}")
 
 
 def cmd_restore(args):

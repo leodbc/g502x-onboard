@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 
 class PrivacyClass(str, Enum):
@@ -17,8 +17,10 @@ class PrivacyClass(str, Enum):
 
 class ErrorCode(str, Enum):
     INVALID_INPUT = "invalid-input"
+    CONFIG_ERROR = "config-error"
     READ_ONLY = "read-only"
     SAFETY_REFUSAL = "safety-refusal"
+    BUSY = "busy"
     BACKEND_FAILURE = "backend-failure"
 
 
@@ -38,6 +40,11 @@ class ApplicationError:
     code: ErrorCode
     message: str
     privacy: PrivacyClass
+    detail: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.detail is not None and self.privacy is PrivacyClass.SHAREABLE:
+            raise ValueError("shareable errors cannot carry private diagnostic detail")
 
 
 T = TypeVar("T")
@@ -153,3 +160,130 @@ class PreparationContext:
 
     def baseline_map(self) -> dict[int, bytes]:
         return dict(self.baseline_images)
+
+
+@dataclass(frozen=True)
+class ProbeDetails:
+    """CLI-compatible probe payload with an explicit privacy class."""
+
+    payload: dict[str, Any] = field(repr=False)
+    privacy: PrivacyClass = PrivacyClass.SHAREABLE
+
+
+@dataclass(frozen=True)
+class ValidationDetails:
+    """Validation data needed by both JSON and text adapters."""
+
+    ok: bool
+    enabled_profiles: tuple[int, ...]
+    referenced_macro_starts: int
+    warnings: tuple[str, ...]
+    errors: tuple[str, ...]
+    summary: dict[str, Any] = field(repr=False)
+    privacy: PrivacyClass = PrivacyClass.LOCAL_SENSITIVE
+
+
+@dataclass(frozen=True)
+class StatusSnapshot:
+    """Observed status plus the already-redacted summary selected by the caller."""
+
+    active_profile: int | None
+    descriptor: dict[str, Any] = field(repr=False)
+    summary: dict[str, Any] = field(repr=False)
+    enabled_profiles: tuple[int, ...] = ()
+    privacy: PrivacyClass = PrivacyClass.SHAREABLE
+
+
+@dataclass(frozen=True)
+class InspectSnapshot:
+    rows: tuple[dict[str, Any], ...] = field(repr=False)
+    enabled_profiles: tuple[int, ...] = ()
+    privacy: PrivacyClass = PrivacyClass.SHAREABLE
+
+
+@dataclass(frozen=True)
+class PlanSnapshot:
+    config_path: str
+    plan: dict[str, Any] = field(repr=False)
+    rendered_json: str = field(repr=False)
+    privacy: PrivacyClass = PrivacyClass.LOCAL_SENSITIVE
+
+
+@dataclass(frozen=True)
+class CapacitySnapshot:
+    config_path: str | None = None
+    source_bytes: int | None = None
+    allocated_bytes: int | None = None
+    jump_overhead: int | None = None
+    fragmentation_waste: int | None = None
+    raw_free_bytes: int | None = None
+    usable_free_bytes: int | None = None
+    privacy: PrivacyClass = PrivacyClass.LOCAL_SENSITIVE
+
+
+@dataclass(frozen=True)
+class SetupSnapshot:
+    root: str = field(repr=False)
+    fingerprint: str = field(repr=False)
+    architecture: str = "unknown"
+    transport: str = "unknown"
+    write_allowed: bool = False
+    privacy: PrivacyClass = PrivacyClass.PRIVATE_DIAGNOSTIC
+
+
+@dataclass(frozen=True)
+class BaselineListSnapshot:
+    rows: tuple[dict[str, Any], ...] = field(repr=False)
+    privacy: PrivacyClass = PrivacyClass.SHAREABLE
+
+
+@dataclass(frozen=True)
+class BaselineShowSnapshot:
+    payload: dict[str, Any] = field(repr=False)
+    privacy: PrivacyClass = PrivacyClass.SHAREABLE
+
+
+@dataclass(frozen=True)
+class BaselineUseSnapshot:
+    root: str = field(repr=False)
+    privacy: PrivacyClass = PrivacyClass.PRIVATE_DIAGNOSTIC
+
+
+@dataclass(frozen=True)
+class PublicReportSnapshot:
+    payload: dict[str, Any] = field(repr=False)
+    privacy: PrivacyClass = PrivacyClass.SHAREABLE
+
+
+@dataclass(frozen=True)
+class ReportCheckResult:
+    format: str
+    privacy: PrivacyClass = PrivacyClass.SHAREABLE
+
+
+@dataclass(frozen=True)
+class DebugExportSnapshot:
+    payload: dict[str, Any] = field(repr=False)
+    default_directory: str = field(repr=False)
+    privacy: PrivacyClass = PrivacyClass.PRIVATE_DIAGNOSTIC
+
+
+@dataclass(frozen=True)
+class BackupSnapshot:
+    name: str
+    privacy: PrivacyClass = PrivacyClass.PRIVATE_DIAGNOSTIC
+
+
+@dataclass(frozen=True)
+class ReadonlySmokeSnapshot:
+    report_name: str
+    checkpoint_name: str = field(repr=False)
+    architecture: str = "unknown"
+    transport: str = "unknown"
+    profile_format: int | None = None
+    macro_format: int | None = None
+    sector_count: int | None = None
+    sector_size: int | None = None
+    enabled_profiles: tuple[int, ...] = ()
+    macro_starts: int = 0
+    privacy: PrivacyClass = PrivacyClass.PRIVATE_DIAGNOSTIC
