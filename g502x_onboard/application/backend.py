@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from .models import (
     BackupSnapshot,
     BaselineListSnapshot,
     BaselineShowSnapshot,
     BaselineUseSnapshot,
+    CancellationToken,
     CapacitySnapshot,
+    CompatibilityObservation,
     DebugExportSnapshot,
     InspectSnapshot,
+    PersistentOperationKind,
+    PersistentPhase,
     PlanSnapshot,
     PreparationContext,
     ProbeDetails,
@@ -22,6 +27,39 @@ from .models import (
     ValidationDetails,
     ValidationSnapshot,
 )
+
+
+@dataclass(frozen=True)
+class PersistentTargetSnapshot:
+    source_path: str | None = field(default=None, repr=False)
+    source_name: str = ""
+    target_digest: str = ""
+
+
+@dataclass(frozen=True)
+class PersistentBackendIntent:
+    kind: PersistentOperationKind
+    target_digest: str
+    active_baseline_binding: str = field(repr=False)
+    exact_unit_binding: str = field(repr=False)
+    compatibility: CompatibilityObservation
+    managed_sectors: tuple[int, ...]
+    source_path: str | None = field(default=None, repr=False)
+    source_digest: str | None = field(default=None, repr=False)
+    plan: dict[str, Any] | None = field(default=None, repr=False)
+    normalized_config: dict[str, Any] | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class PersistentBackendResult:
+    enabled_profiles: tuple[int, ...]
+    safety_backup_name: str | None
+    reconciliation_completed: bool
+    post_validation_completed: bool
+
+
+class CooperativeCancellationError(RuntimeError):
+    """Raised only before the first potentially persistent backend action."""
 
 
 @runtime_checkable
@@ -90,3 +128,16 @@ class Backend(Protocol):
         report_path: str,
         label: str,
     ) -> ReadonlySmokeSnapshot: ...
+
+    def persistent_target(
+        self,
+        kind: PersistentOperationKind,
+        source: str | None = None,
+    ) -> PersistentTargetSnapshot: ...
+
+    def execute_persistent(
+        self,
+        intent: PersistentBackendIntent,
+        cancellation: CancellationToken,
+        phase_callback: Callable[[PersistentPhase], None],
+    ) -> PersistentBackendResult: ...
