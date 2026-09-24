@@ -56,6 +56,8 @@ A `PreparedOperation` is immutable application data containing enough informatio
 
 Prepared data must not contain a live HID handle. It is safe to retain while the human reviews because execution must revalidate it.
 
+A preparation id is single-use once the application coordinator accepts an execution request and transitions that operation into `REVALIDATING`. The coordinator must atomically claim/consume that id before execution work can be duplicated. A concurrent or repeated submit for the same preparation must be rejected rather than queued as another transaction. After that claim, the same preparation id must not be accepted for a second execution attempt, regardless of whether revalidation refuses the operation, cooperative cancellation occurs before `WRITING`, or the transaction later succeeds or fails. Any later attempt requires a newly prepared, reviewed, and typed-confirmed operation.
+
 For `apply`, the preparation must bind the exact normalized config/compiled plan and inherited baseline bytes represented to the user. Restore preparations must bind the exact backup/baseline target accepted by existing validation.
 
 ## Human review

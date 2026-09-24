@@ -61,20 +61,25 @@ Persistent-operation tests must prove:
 - typed-confirmation phrase is supplied by the operation contract;
 - execution revalidates after review;
 - baseline change after preparation fails before any write;
-- device hot-swap/identity change fails before any further write;
-- firmware/transport eligibility change fails closed;
+- device hot-swap/identity change detected during execution-time revalidation fails before any write;
+- firmware/transport eligibility change during execution-time revalidation fails before any write;
 - G HUB or Onboard Memory Manager becoming active after review fails before write;
 - SAFE/recovery precondition change after review fails before write;
-- changed config/plan/backup target invalidates preparation;
+- changed config/plan/backup target invalidates preparation before write;
+- a preparation id is single-use once execution is accepted; reusing that consumed id is rejected;
 - no force/override path exists;
 - readback/reconciliation determines ambiguous write outcomes;
 - full post-write validation is performed.
+
+For every refused destructive path that is supposed to fail before persistence—including stale baseline, hot-swap during revalidation, firmware/transport eligibility change, host-guard change, SAFE/recovery change, changed config/plan/backup target, protected-domain refusal, unknown hardware, and consumed-preparation reuse—reset the FakeBackend persistent-write counter and assert the final write-call count is exactly **zero**. An exception/refusal assertion by itself is insufficient.
 
 ### 3. One-operation-at-a-time tests
 
 Use controlled blocking FakeBackend calls to prove:
 
 - a second hardware operation is rejected while one is active;
+- simultaneous/rapid double-submit of the same prepared operation yields exactly one accepted execution claim, rejects the duplicate instead of queueing it, and cannot create duplicate write authority;
+- reusing a preparation id after it has been consumed is rejected even after the first attempt reaches a terminal result;
 - read-only refresh cannot overlap a persistent transaction;
 - the in-process coordinator and OS-backed operation lock are both used;
 - operation state is released after success and after terminal failure;
