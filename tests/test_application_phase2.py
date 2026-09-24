@@ -249,6 +249,44 @@ class Phase2ApplicationWorkflowTests(unittest.TestCase):
         self.assertTrue(second.ok)
         self.assertEqual(backend.persistent_write_count, 0)
 
+    def test_fake_backend_readonly_smoke_cannot_broaden_real_policy(self):
+        cases = (
+            {"architecture": "unknown"},
+            {"transport": "untested"},
+            {"stable_identity": False},
+            {"write_allowed": False},
+            {"host_guard_clear": False},
+            {"active_profile": 2},
+            {"recovery_ok": False},
+        )
+        for state in cases:
+            with self.subTest(state=state):
+                backend = FakeBackend(fake_baseline(), **state)
+                app = ApplicationFacade(backend)
+                result = app.readonly_smoke(
+                    report_path="report.json",
+                    label="smoke",
+                )
+                self.assertFalse(result.ok)
+                self.assertEqual(backend.persistent_write_count, 0)
+
+    def test_fake_backend_public_report_check_uses_authoritative_validator(self):
+        report = self.app.report_probe(pid=0xC547, index=1)
+        self.assertTrue(report.ok)
+        unsafe = dict(report.value.payload)
+        unsafe["fingerprint"] = "a" * 24
+        checked = self.app.check_public_report(unsafe)
+        self.assertFalse(checked.ok)
+        self.assertEqual(self.backend.persistent_write_count, 0)
+
+    def test_fake_backend_rejects_unknown_baseline_and_unsafe_backup_label(self):
+        unknown = self.app.use_baseline("not-the-fixture")
+        self.assertFalse(unknown.ok)
+
+        unsafe_label = self.app.create_backup("../escape")
+        self.assertFalse(unsafe_label.ok)
+        self.assertEqual(self.backend.persistent_write_count, 0)
+
     def test_public_facade_has_no_persistent_execution_surface(self):
         forbidden = {
             "execute_prepared",
