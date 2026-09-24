@@ -62,6 +62,21 @@ class CooperativeCancellationError(RuntimeError):
     """Raised only before the first potentially persistent backend action."""
 
 
+class PersistentBackendFailure(RuntimeError):
+    """Internal failure carrying authoritative terminal-progress evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reconciliation_completed: bool = False,
+        post_validation_completed: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.reconciliation_completed = reconciliation_completed
+        self.post_validation_completed = post_validation_completed
+
+
 @runtime_checkable
 class Backend(Protocol):
     """Synchronous, use-case-shaped application/backend boundary."""

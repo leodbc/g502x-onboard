@@ -18,7 +18,12 @@ from ..constants import (
     PROGRAMMABLE_SECTORS,
     RECOVERY_SECTORS,
 )
-from .backend import Backend, CooperativeCancellationError, PersistentBackendIntent
+from .backend import (
+    Backend,
+    CooperativeCancellationError,
+    PersistentBackendFailure,
+    PersistentBackendIntent,
+)
 from .coordinator import OperationBusyError, OperationCoordinator
 from .models import (
     ApplicationError,
@@ -562,6 +567,22 @@ def execute_prepared(
                 message="operation cancelled before the first persistent write",
                 trace=trace,
                 writing_started=PersistentPhase.WRITING in trace,
+            )
+        except PersistentBackendFailure as exc:
+            return _terminal(
+                prepared,
+                success=False,
+                status=(
+                    "failed-after-write"
+                    if PersistentPhase.WRITING in trace
+                    else "revalidation-refused"
+                ),
+                error_code=ErrorCode.BACKEND_FAILURE,
+                message="persistent operation refused or failed",
+                trace=trace,
+                writing_started=PersistentPhase.WRITING in trace,
+                reconciliation_completed=exc.reconciliation_completed,
+                post_validation_completed=exc.post_validation_completed,
             )
         except Exception:
             return _terminal(

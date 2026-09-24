@@ -13,6 +13,7 @@ from ..constants import (
 )
 from .backend import (
     CooperativeCancellationError,
+    PersistentBackendFailure,
     PersistentBackendResult,
     PersistentTargetSnapshot,
 )
@@ -76,6 +77,8 @@ def _cancel(cancellation) -> None:
 
 
 def execute_fake_persistent(backend, intent, cancellation, phase_callback):
+    reconciliation_completed = False
+    post_validation_completed = False
     backend.write_history.append("os-lock:enter")
     try:
         backend.read_history.append("persistent-revalidate")
@@ -138,6 +141,7 @@ def execute_fake_persistent(backend, intent, cancellation, phase_callback):
         phase_callback(PersistentPhase.ARMED)
         _maybe_block(backend, "armed")
         _cancel(cancellation)
+        _maybe_block(backend, "before-first-write")
         _cancel(cancellation)
         phase_callback(PersistentPhase.WRITING)
         _maybe_block(backend, "writing")
@@ -179,12 +183,16 @@ def execute_fake_persistent(backend, intent, cancellation, phase_callback):
         _maybe_block(backend, "reconciling")
         if backend.fault_at == "final-reconciliation":
             raise RuntimeError("synthetic final reconciliation failure")
+        reconciliation_completed = True
 
         phase_callback(PersistentPhase.POST_VALIDATING)
         backend.read_history.append("post-validation")
         _maybe_block(backend, "post-validating")
-        if backend.fault_at == "post-validation" or not backend.post_validation_ok:
-            raise RuntimeError("synthetic post-validation failure")
+        if backend.fault_at == "post-validation":
+            raise RuntimeError("synthetic post-validation interruption")
+        post_validation_completed = True
+        if not backend.post_validation_ok:
+            raise RuntimeError("synthetic post-validation report failure")
 
         return PersistentBackendResult(
             enabled_profiles=tuple(backend.enabled_profiles),
@@ -200,5 +208,15 @@ def execute_fake_persistent(backend, intent, cancellation, phase_callback):
             reconciliation_completed=True,
             post_validation_completed=True,
         )
+    except CooperativeCancellationError:
+        raise
+    except PersistentBackendFailure:
+        raise
+    except Exception as exc:
+        raise PersistentBackendFailure(
+            "fake persistent transaction failed",
+            reconciliation_completed=reconciliation_completed,
+            post_validation_completed=post_validation_completed,
+        ) from exc
     finally:
         backend.write_history.append("os-lock:exit")
