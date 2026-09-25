@@ -81,6 +81,15 @@ _PROGRESS_NEXT = {
     PersistentPhase.RECONCILING: PersistentPhase.POST_VALIDATING,
 }
 
+_PRE_EXECUTION_PHASES = frozenset(
+    {
+        PersistentPhase.PREPARING,
+        PersistentPhase.PREPARED,
+        PersistentPhase.REVIEWING,
+        PersistentPhase.CONFIRMING,
+    }
+)
+
 
 def _is_current(model: TuiModel, operation_id) -> bool:
     return model.active is not None and model.active.operation_id == operation_id
@@ -233,7 +242,11 @@ def update(
         ), ()
 
     if isinstance(event, PreparedReceived):
-        if not _is_current(model, event.operation_id):
+        if (
+            not _is_current(model, event.operation_id)
+            or model.active.execution_requested
+            or model.active.phase not in _PRE_EXECUTION_PHASES
+        ):
             return model, ()
         if (
             model.active.persistent_kind is not None
@@ -242,6 +255,8 @@ def update(
             return model, ()
         target_surface = model.surface_privacy
         if not privacy_allows(target_surface, event.prepared.privacy):
+            if event.prepared.privacy is PrivacyClass.PRIVATE_DIAGNOSTIC:
+                return model, ()
             target_surface = event.prepared.privacy
         active = replace(
             model.active,
@@ -262,6 +277,8 @@ def update(
         if (
             not _is_current(model, event.operation_id)
             or model.prepared is None
+            or model.active.execution_requested
+            or model.active.phase not in _PRE_EXECUTION_PHASES
         ):
             return model, ()
         active = replace(model.active, phase=PersistentPhase.REVIEWING)
@@ -276,6 +293,8 @@ def update(
         if (
             not _is_current(model, event.operation_id)
             or model.prepared is None
+            or model.active.execution_requested
+            or model.active.phase not in _PRE_EXECUTION_PHASES
         ):
             return model, ()
         return replace(
@@ -286,6 +305,8 @@ def update(
         if (
             not _is_current(model, event.operation_id)
             or model.prepared is None
+            or model.active.execution_requested
+            or model.active.phase not in _PRE_EXECUTION_PHASES
         ):
             return model, ()
         active = replace(model.active, phase=PersistentPhase.CONFIRMING)
@@ -302,6 +323,10 @@ def update(
             not _is_current(model, event.operation_id)
             or model.prepared is None
             or not model.review_acknowledged
+            or model.active.execution_requested
+            or model.active.phase is not PersistentPhase.CONFIRMING
+            or model.confirmation_input.strip()
+            != model.prepared.required_confirmation_phrase
         ):
             return model, ()
         effect = ExecutePreparedOperation(
@@ -317,7 +342,10 @@ def update(
         return replace(model, active=active), (effect,)
 
     if isinstance(event, PersistentProgress):
-        if not _is_current(model, event.operation_id):
+        if (
+            not _is_current(model, event.operation_id)
+            or not model.active.execution_requested
+        ):
             return model, ()
         if (
             model.active.persistent_kind is not None
@@ -365,7 +393,12 @@ def update(
         )
 
     if isinstance(event, CancellationAcknowledged):
-        if not _is_current(model, event.operation_id):
+        if (
+            not _is_current(model, event.operation_id)
+            or not model.active.cancellation_requested
+            or model.active.non_cancellable
+            or model.active.cancellation_deferred
+        ):
             return model, ()
         active = replace(
             model.active, cancellation_acknowledged=True
@@ -389,7 +422,7 @@ def update(
     if isinstance(event, ApplicationCompleted):
         if not _is_current(model, event.operation_id):
             return model, ()
-        if model.active.persistent_kind is not None and model.active.execution_requested:
+        if model.active.persistent_kind is not None:
             return model, ()
         payload = _terminal_payload(
             event.message, event.privacy, model.surface_privacy
@@ -407,7 +440,14 @@ def update(
     if isinstance(event, ApplicationFailed):
         if not _is_current(model, event.operation_id):
             return model, ()
+        persistent = model.active.persistent_kind is not None
         if model.active.non_cancellable:
+            return model, ()
+        if (
+            persistent
+            and not model.active.execution_requested
+            and model.active.phase is not PersistentPhase.PREPARING
+        ):
             return model, ()
         error = _payload_for_surface(
             event.error, model.surface_privacy
@@ -418,6 +458,13 @@ def update(
         return replace(
             model,
             active=None,
+            prepared=(None if persistent else model.prepared),
+            review_acknowledged=(
+                False if persistent else model.review_acknowledged
+            ),
+            confirmation_input=(
+                "" if persistent else model.confirmation_input
+            ),
             terminal=terminal,
             last_result=None,
             last_error=error,
@@ -450,7 +497,10 @@ def update(
         ), ()
 
     if isinstance(event, PersistentCompleted):
-        if not _is_current(model, event.operation_id):
+        if (
+            not _is_current(model, event.operation_id)
+            or not model.active.execution_requested
+        ):
             return model, ()
         result = event.result
         if (
