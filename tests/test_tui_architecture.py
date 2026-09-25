@@ -145,6 +145,40 @@ print("PURE_TUI_IMPORT_OK")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("PURE_TUI_IMPORT_OK", proc.stdout)
 
+    def test_existing_cli_import_does_not_require_textual_or_rich(self):
+        code = r'''
+import builtins
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name == "textual" or name.startswith("textual.") or name == "rich" or name.startswith("rich."):
+        raise AssertionError("optional UI dependency imported")
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+import g502x_onboard.cli
+print("CORE_CLI_IMPORT_OK")
+'''
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("CORE_CLI_IMPORT_OK", proc.stdout)
+
+    def test_existing_cli_help_still_runs(self):
+        proc = subprocess.run(
+            [sys.executable, "g502x.py", "--help"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("usage:", proc.stdout.lower())
+
+
     def test_effect_values_carry_no_callable_or_live_authority(self):
         from dataclasses import fields
         from g502x_onboard.tui import effects
