@@ -368,6 +368,30 @@ class TuiStateEngineTests(unittest.TestCase):
         self.assertEqual(model, before)
         self.assertEqual(effects, ())
 
+    def test_forward_phase_skip_is_ignored(self):
+        model = self.prepared_model()
+        model, _ = update(model, EnterReview(self.op))
+        model, _ = update(
+            model, ReviewAcknowledged(self.op, True)
+        )
+        model, _ = update(
+            model, ConfirmationChanged(self.op, "APPLY CONFIG")
+        )
+        before = model
+        model, effects = update(
+            model,
+            PersistentProgress(
+                self.op,
+                PersistentPhaseSnapshot(
+                    PersistentPhase.ARMED,
+                    PersistentOperationKind.APPLY_CONFIG,
+                    True,
+                ),
+            ),
+        )
+        self.assertEqual(model, before)
+        self.assertEqual(effects, ())
+
     def test_terminal_progress_is_not_authoritative(self):
         model = self.writing_model()
         before = model
