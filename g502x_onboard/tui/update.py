@@ -389,6 +389,8 @@ def update(
     if isinstance(event, ApplicationCompleted):
         if not _is_current(model, event.operation_id):
             return model, ()
+        if model.active.persistent_kind is not None and model.active.execution_requested:
+            return model, ()
         payload = _terminal_payload(
             event.message, event.privacy, model.surface_privacy
         )
@@ -404,6 +406,8 @@ def update(
 
     if isinstance(event, ApplicationFailed):
         if not _is_current(model, event.operation_id):
+            return model, ()
+        if model.active.non_cancellable:
             return model, ()
         error = _payload_for_surface(
             event.error, model.surface_privacy
@@ -422,6 +426,8 @@ def update(
 
     if isinstance(event, PreparationInvalidated):
         if not _is_current(model, event.operation_id):
+            return model, ()
+        if model.active.non_cancellable:
             return model, ()
         error = _payload_for_surface(
             event.error, model.surface_privacy
