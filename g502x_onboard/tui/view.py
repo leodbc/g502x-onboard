@@ -134,7 +134,7 @@ def view(model: TuiModel) -> ViewModel:
         ),
         required_confirmation_phrase=(
             model.prepared.required_confirmation_phrase
-            if confirmation_visible
+            if review_visible or confirmation_visible
             else None
         ),
         confirmation_matches=confirmation_matches,
