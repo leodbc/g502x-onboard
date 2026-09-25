@@ -613,11 +613,14 @@ def cmd_status(args):
             "health",
             "crc_valid" if row["crc_ok"] else "invalid",
         )
-        print(
-            f"  s{sector}: state={health:9} "
-            f"payload_non-FF={row['payload_non_ff']:3d} "
-            f"high-water={row['high_water']:3d}/{PAGE_DATA_SIZE}"
-        )
+        if args.private:
+            print(
+                f"  s{sector}: state={health:9} "
+                f"payload_non-FF={row['payload_non_ff']:3d} "
+                f"high-water={row['high_water']:3d}/{PAGE_DATA_SIZE}"
+            )
+        else:
+            print(f"  s{sector}: state={health}")
     print()
     print("Structural validation:", "PASS" if summary["ok"] else "FAIL")
 
