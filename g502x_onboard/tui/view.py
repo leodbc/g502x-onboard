@@ -81,12 +81,25 @@ def view(model: TuiModel) -> ViewModel:
     elif terminal_outcome is TerminalOutcome.FAILURE:
         terminal_label = "FAILURE"
 
-    review_visible = model.prepared is not None and model.route is Route.REVIEW
-    confirmation_visible = (
-        model.prepared is not None and model.route is Route.CONFIRMATION
+    review_visible = bool(
+        model.prepared is not None
+        and active is not None
+        and not active.execution_requested
+        and active.phase in {
+            PersistentPhase.PREPARED,
+            PersistentPhase.REVIEWING,
+        }
+        and model.route is Route.REVIEW
+    )
+    confirmation_visible = bool(
+        model.prepared is not None
+        and active is not None
+        and not active.execution_requested
+        and active.phase is PersistentPhase.CONFIRMING
+        and model.route is Route.CONFIRMATION
     )
     confirmation_matches = bool(
-        model.prepared is not None
+        confirmation_visible
         and model.confirmation_input.strip()
         == model.prepared.required_confirmation_phrase
     )
@@ -116,10 +129,12 @@ def view(model: TuiModel) -> ViewModel:
         prepared=model.prepared,
         review_acknowledged=model.review_acknowledged,
         confirmation_visible=confirmation_visible,
-        confirmation_input=model.confirmation_input,
+        confirmation_input=(
+            model.confirmation_input if confirmation_visible else ""
+        ),
         required_confirmation_phrase=(
             model.prepared.required_confirmation_phrase
-            if model.prepared is not None
+            if confirmation_visible
             else None
         ),
         confirmation_matches=confirmation_matches,
