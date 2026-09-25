@@ -1479,6 +1479,46 @@ class TuiStateEngineTests(unittest.TestCase):
         )
 
 
+    def test_view_fails_closed_for_inconsistent_sensitive_model(self):
+        model = replace(
+            TuiModel(),
+            prepared=make_prepared(),
+            last_error=ApplicationError(
+                ErrorCode.BACKEND_FAILURE,
+                "private error",
+                PrivacyClass.PRIVATE_DIAGNOSTIC,
+                detail="unit=secret",
+            ),
+            last_result=PresentationPayload(
+                "local result",
+                PrivacyClass.LOCAL_SENSITIVE,
+            ),
+            read_only_reason=ApplicationError(
+                ErrorCode.READ_ONLY,
+                "private read-only reason",
+                PrivacyClass.PRIVATE_DIAGNOSTIC,
+                detail="unit=secret",
+            ),
+            disclosure=PresentationPayload(
+                "private disclosure",
+                PrivacyClass.PRIVATE_DIAGNOSTIC,
+            ),
+            transient_notice=PresentationPayload(
+                "local notice",
+                PrivacyClass.LOCAL_SENSITIVE,
+            ),
+        )
+        vm = view(model)
+        self.assertEqual(vm.privacy, PrivacyClass.SHAREABLE)
+        self.assertIsNone(vm.prepared)
+        self.assertIsNone(vm.persistent_kind)
+        self.assertIsNone(vm.read_only_reason)
+        self.assertIsNone(vm.message)
+        self.assertIsNone(vm.detail)
+        self.assertIsNone(vm.disclosure_message)
+        self.assertIsNone(vm.required_confirmation_phrase)
+
+
     def test_terminal_replay_is_ignored_after_operation_is_released(self):
         model = self.execution_model(PersistentPhase.POST_VALIDATING)
         result = persistent_result(
