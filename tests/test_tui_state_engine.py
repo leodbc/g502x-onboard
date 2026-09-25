@@ -715,6 +715,56 @@ class TuiStateEngineTests(unittest.TestCase):
             self.assertTrue(view(after).non_cancellable)
             model = after
 
+    def test_generic_completion_cannot_fabricate_persistent_success(self):
+        model = self.writing_model()
+        after, effects = update(
+            model,
+            ApplicationCompleted(
+                self.op,
+                "generic completion",
+                PrivacyClass.SHAREABLE,
+            ),
+        )
+        self.assertEqual(after, model)
+        self.assertEqual(effects, ())
+        self.assertIsNone(after.terminal)
+
+    def test_generic_failure_does_not_drop_non_cancellable_transaction(self):
+        model = self.writing_model()
+        after, effects = update(
+            model,
+            ApplicationFailed(
+                self.op,
+                ApplicationError(
+                    ErrorCode.BACKEND_FAILURE,
+                    "generic worker failure",
+                    PrivacyClass.SHAREABLE,
+                ),
+            ),
+        )
+        self.assertEqual(after, model)
+        self.assertEqual(effects, ())
+        self.assertEqual(after.active.phase, PersistentPhase.WRITING)
+        self.assertIsNone(after.terminal)
+
+    def test_invalidation_does_not_drop_non_cancellable_transaction(self):
+        model = self.writing_model()
+        after, effects = update(
+            model,
+            PreparationInvalidated(
+                self.op,
+                ApplicationError(
+                    ErrorCode.STALE_PREPARATION,
+                    "stale",
+                    PrivacyClass.LOCAL_SENSITIVE,
+                ),
+            ),
+        )
+        self.assertEqual(after, model)
+        self.assertEqual(effects, ())
+        self.assertEqual(after.active.phase, PersistentPhase.WRITING)
+        self.assertIsNone(after.terminal)
+
     def test_terminal_result_accepted_after_writing_cancel_request(self):
         model = self.writing_model()
         model, _ = update(
