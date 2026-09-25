@@ -137,6 +137,9 @@ class TuiStateEngineTests(unittest.TestCase):
         return model
 
     def writing_model(self):
+        return self.execution_model(PersistentPhase.WRITING)
+
+    def execution_model(self, target):
         model = self.prepared_model()
         model, _ = update(model, EnterReview(self.op))
         model, _ = update(model, ReviewAcknowledged(self.op, True))
@@ -144,10 +147,14 @@ class TuiStateEngineTests(unittest.TestCase):
             model, ConfirmationChanged(self.op, "APPLY CONFIG")
         )
         model, _ = update(model, ConfirmationSubmitted(self.op))
+        if target is PersistentPhase.CONFIRMING:
+            return model
         for phase in (
             PersistentPhase.REVALIDATING,
             PersistentPhase.ARMED,
             PersistentPhase.WRITING,
+            PersistentPhase.RECONCILING,
+            PersistentPhase.POST_VALIDATING,
         ):
             model, _ = update(
                 model,
@@ -156,11 +163,16 @@ class TuiStateEngineTests(unittest.TestCase):
                     PersistentPhaseSnapshot(
                         phase,
                         PersistentOperationKind.APPLY_CONFIG,
-                        phase is not PersistentPhase.WRITING,
+                        phase in {
+                            PersistentPhase.REVALIDATING,
+                            PersistentPhase.ARMED,
+                        },
                     ),
                 ),
             )
-        return model
+            if phase is target:
+                return model
+        raise AssertionError(f"unsupported execution phase: {target}")
 
     def test_initial_model_invariants(self):
         model = TuiModel()
@@ -331,6 +343,7 @@ class TuiStateEngineTests(unittest.TestCase):
         model, _ = update(
             model, ConfirmationChanged(self.op, "APPLY CONFIG")
         )
+        model, _ = update(model, ConfirmationSubmitted(self.op))
         for phase, allowed in (
             (PersistentPhase.REVALIDATING, True),
             (PersistentPhase.ARMED, True),
@@ -377,6 +390,7 @@ class TuiStateEngineTests(unittest.TestCase):
         model, _ = update(
             model, ConfirmationChanged(self.op, "APPLY CONFIG")
         )
+        model, _ = update(model, ConfirmationSubmitted(self.op))
         before = model
         model, effects = update(
             model,
@@ -1082,7 +1096,7 @@ class TuiStateEngineTests(unittest.TestCase):
         )
 
     def test_wrong_persistent_kind_events_are_ignored(self):
-        model = self.prepared_model()
+        model = self.execution_model(PersistentPhase.CONFIRMING)
         wrong_snapshot = PersistentPhaseSnapshot(
             PersistentPhase.REVALIDATING,
             PersistentOperationKind.RESTORE_BACKUP,
@@ -1138,6 +1152,290 @@ class TuiStateEngineTests(unittest.TestCase):
         self.assertIsNone(vm.prepared)
         self.assertIsNone(
             vm.required_confirmation_phrase
+        )
+
+
+    def test_all_different_id_stale_events_are_ignored(self):
+        model = self.writing_model()
+        stale_error = ApplicationError(
+            ErrorCode.BACKEND_FAILURE,
+            "stale",
+            PrivacyClass.SHAREABLE,
+        )
+        stale_invalidation = ApplicationError(
+            ErrorCode.STALE_PREPARATION,
+            "stale preparation",
+            PrivacyClass.LOCAL_SENSITIVE,
+        )
+        stale_result = persistent_result(
+            success=True,
+            terminal_phase=PersistentPhase.SUCCEEDED,
+            writing_started=True,
+            reconciled=True,
+            post_validated=True,
+        )
+        candidates = (
+            OperationStarted(self.other),
+            PreparedReceived(
+                self.other, make_prepared("prep-stale")
+            ),
+            EnterReview(self.other),
+            ReviewAcknowledged(self.other, False),
+            ConfirmationChanged(self.other, "APPLY CONFIG"),
+            ConfirmationSubmitted(self.other),
+            PersistentProgress(
+                self.other,
+                PersistentPhaseSnapshot(
+                    PersistentPhase.RECONCILING,
+                    PersistentOperationKind.APPLY_CONFIG,
+                    False,
+                ),
+            ),
+            ApplicationCompleted(self.other, "stale completion"),
+            PersistentCompleted(self.other, stale_result),
+            ApplicationFailed(self.other, stale_error),
+            PreparationInvalidated(
+                self.other, stale_invalidation
+            ),
+            CancellationRequested(self.other),
+            CancellationAcknowledged(self.other),
+        )
+        for event in candidates:
+            with self.subTest(event=type(event).__name__):
+                after, effects = update(model, event)
+                self.assertEqual(after, model)
+                self.assertEqual(effects, ())
+
+    def test_execution_phases_reject_same_id_pre_execution_events(self):
+        phases = (
+            PersistentPhase.REVALIDATING,
+            PersistentPhase.ARMED,
+            PersistentPhase.WRITING,
+            PersistentPhase.RECONCILING,
+            PersistentPhase.POST_VALIDATING,
+        )
+        event_factories = (
+            lambda: PreparedReceived(
+                self.op, make_prepared("prep-late")
+            ),
+            lambda: EnterReview(self.op),
+            lambda: ReviewAcknowledged(self.op, False),
+            lambda: ConfirmationChanged(
+                self.op, "CHANGED AFTER EXECUTION"
+            ),
+            lambda: ConfirmationSubmitted(self.op),
+        )
+        for phase in phases:
+            for make_event in event_factories:
+                model = self.execution_model(phase)
+                event = make_event()
+                with self.subTest(
+                    phase=phase, event=type(event).__name__
+                ):
+                    after, effects = update(model, event)
+                    self.assertEqual(after, model)
+                    self.assertEqual(effects, ())
+                    self.assertEqual(after.active.phase, phase)
+                    if phase in {
+                        PersistentPhase.WRITING,
+                        PersistentPhase.RECONCILING,
+                        PersistentPhase.POST_VALIDATING,
+                    }:
+                        self.assertTrue(view(after).non_cancellable)
+
+    def test_duplicate_confirmation_submit_never_reissues_execution(self):
+        for phase in (
+            PersistentPhase.CONFIRMING,
+            PersistentPhase.REVALIDATING,
+            PersistentPhase.ARMED,
+            PersistentPhase.WRITING,
+            PersistentPhase.RECONCILING,
+            PersistentPhase.POST_VALIDATING,
+        ):
+            model = self.execution_model(phase)
+            after, effects = update(
+                model, ConfirmationSubmitted(self.op)
+            )
+            with self.subTest(phase=phase):
+                self.assertEqual(after, model)
+                self.assertEqual(effects, ())
+
+    def test_confirmation_submit_requires_exact_current_phrase(self):
+        model = self.prepared_model()
+        model, _ = update(model, EnterReview(self.op))
+        model, _ = update(model, ReviewAcknowledged(self.op, True))
+        model, _ = update(
+            model, ConfirmationChanged(self.op, "WRONG")
+        )
+        before = model
+        after, effects = update(
+            model, ConfirmationSubmitted(self.op)
+        )
+        self.assertEqual(after, before)
+        self.assertEqual(effects, ())
+        self.assertFalse(after.active.execution_requested)
+
+    def test_progress_requires_an_execution_request(self):
+        model = self.prepared_model()
+        model, _ = update(model, EnterReview(self.op))
+        model, _ = update(model, ReviewAcknowledged(self.op, True))
+        model, _ = update(
+            model, ConfirmationChanged(self.op, "APPLY CONFIG")
+        )
+        self.assertFalse(model.active.execution_requested)
+        before = model
+        after, effects = update(
+            model,
+            PersistentProgress(
+                self.op,
+                PersistentPhaseSnapshot(
+                    PersistentPhase.REVALIDATING,
+                    PersistentOperationKind.APPLY_CONFIG,
+                    True,
+                ),
+            ),
+        )
+        self.assertEqual(after, before)
+        self.assertEqual(effects, ())
+
+    def test_persistent_completion_requires_an_execution_request(self):
+        preparing, _ = self.request_prepare()
+        prepared = self.prepared_model()
+        reviewing, _ = update(prepared, EnterReview(self.op))
+        reviewing, _ = update(
+            reviewing, ReviewAcknowledged(self.op, True)
+        )
+        confirming, _ = update(
+            reviewing, ConfirmationChanged(self.op, "APPLY CONFIG")
+        )
+        result = persistent_result(
+            success=True,
+            terminal_phase=PersistentPhase.SUCCEEDED,
+            writing_started=True,
+            reconciled=True,
+            post_validated=True,
+        )
+        for model in (
+            preparing,
+            prepared,
+            reviewing,
+            confirming,
+        ):
+            with self.subTest(phase=model.active.phase):
+                after, effects = update(
+                    model, PersistentCompleted(self.op, result)
+                )
+                self.assertEqual(after, model)
+                self.assertEqual(effects, ())
+                self.assertIsNone(after.terminal)
+
+    def test_generic_completion_after_preparation_is_ignored(self):
+        model = self.prepared_model()
+        before = model
+        after, effects = update(
+            model,
+            ApplicationCompleted(
+                self.op,
+                "generic preparation completion",
+                PrivacyClass.SHAREABLE,
+            ),
+        )
+        self.assertEqual(after, before)
+        self.assertEqual(effects, ())
+        self.assertIs(after.prepared, before.prepared)
+        self.assertIsNone(after.terminal)
+
+    def test_cancellation_ack_requires_a_valid_pending_request(self):
+        model = self.prepared_model()
+        before = model
+        after, effects = update(
+            model, CancellationAcknowledged(self.op)
+        )
+        self.assertEqual(after, before)
+        self.assertEqual(effects, ())
+
+        writing = self.writing_model()
+        deferred, _ = update(
+            writing, CancellationRequested(self.op)
+        )
+        after, effects = update(
+            deferred, CancellationAcknowledged(self.op)
+        )
+        self.assertEqual(after, deferred)
+        self.assertEqual(effects, ())
+        self.assertFalse(after.active.cancellation_acknowledged)
+
+    def test_privacy_downgrade_preserves_active_execution_lifecycle(self):
+        for phase in (
+            PersistentPhase.REVALIDATING,
+            PersistentPhase.ARMED,
+            PersistentPhase.WRITING,
+            PersistentPhase.RECONCILING,
+            PersistentPhase.POST_VALIDATING,
+        ):
+            model = self.execution_model(phase)
+            after, effects = update(
+                model,
+                ChangePrivacySurface(PrivacyClass.SHAREABLE),
+            )
+            with self.subTest(phase=phase):
+                self.assertEqual(effects, ())
+                self.assertEqual(
+                    after.surface_privacy, PrivacyClass.SHAREABLE
+                )
+                self.assertIsNotNone(after.active)
+                self.assertEqual(after.active.phase, phase)
+                self.assertTrue(after.active.execution_requested)
+                self.assertIsNone(after.prepared)
+                self.assertFalse(after.review_acknowledged)
+                self.assertEqual(after.confirmation_input, "")
+                vm = view(after)
+                self.assertIsNone(vm.prepared)
+                self.assertIsNone(vm.required_confirmation_phrase)
+                if phase in {
+                    PersistentPhase.WRITING,
+                    PersistentPhase.RECONCILING,
+                    PersistentPhase.POST_VALIDATING,
+                }:
+                    self.assertTrue(vm.non_cancellable)
+
+    def test_terminal_result_still_accepted_after_privacy_downgrade(self):
+        model = self.execution_model(PersistentPhase.POST_VALIDATING)
+        model, _ = update(
+            model,
+            ChangePrivacySurface(PrivacyClass.SHAREABLE),
+        )
+        result = persistent_result(
+            success=True,
+            terminal_phase=PersistentPhase.SUCCEEDED,
+            writing_started=True,
+            reconciled=True,
+            post_validated=True,
+        )
+        model, effects = update(
+            model, PersistentCompleted(self.op, result)
+        )
+        self.assertEqual(effects, ())
+        self.assertEqual(
+            model.terminal.outcome, TerminalOutcome.SUCCESS
+        )
+        self.assertIsNone(model.last_result)
+        self.assertIsNone(view(model).prepared)
+
+    def test_private_prepared_payload_does_not_auto_escalate_surface(self):
+        private_prepared = replace(
+            make_prepared(),
+            privacy=PrivacyClass.PRIVATE_DIAGNOSTIC,
+        )
+        model, _ = self.request_prepare()
+        before = model
+        after, effects = update(
+            model, PreparedReceived(self.op, private_prepared)
+        )
+        self.assertEqual(after, before)
+        self.assertEqual(effects, ())
+        self.assertEqual(
+            after.surface_privacy, PrivacyClass.SHAREABLE
         )
 
 
