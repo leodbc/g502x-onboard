@@ -9,7 +9,13 @@ from g502x_onboard.application.models import (
     PreparedOperation,
     PrivacyClass,
 )
-from .model import OperationAction, Route, TerminalOutcome, TuiModel
+from .model import (
+    OperationAction,
+    Route,
+    TerminalOutcome,
+    TuiModel,
+    privacy_allows,
+)
 
 
 @dataclass(frozen=True)
@@ -62,17 +68,58 @@ def view(model: TuiModel) -> ViewModel:
     non_cancellable = bool(active and active.non_cancellable)
     cancellation_available = bool(active and active.cancellation_available)
 
+    prepared = (
+        model.prepared
+        if model.prepared is not None
+        and privacy_allows(model.surface_privacy, model.prepared.privacy)
+        else None
+    )
+    last_error = (
+        model.last_error
+        if model.last_error is not None
+        and privacy_allows(model.surface_privacy, model.last_error.privacy)
+        else None
+    )
+    last_result = (
+        model.last_result
+        if model.last_result is not None
+        and privacy_allows(model.surface_privacy, model.last_result.privacy)
+        else None
+    )
+    transient_notice = (
+        model.transient_notice
+        if model.transient_notice is not None
+        and privacy_allows(
+            model.surface_privacy, model.transient_notice.privacy
+        )
+        else None
+    )
+    read_only_reason = (
+        model.read_only_reason
+        if model.read_only_reason is not None
+        and privacy_allows(
+            model.surface_privacy, model.read_only_reason.privacy
+        )
+        else None
+    )
+    disclosure = (
+        model.disclosure
+        if model.disclosure is not None
+        and privacy_allows(model.surface_privacy, model.disclosure.privacy)
+        else None
+    )
+
     message = None
     detail = None
     error_code = model.terminal.error_code if model.terminal else None
-    if model.last_error is not None:
-        message = model.last_error.message
-        detail = model.last_error.detail
-        error_code = model.last_error.code
-    elif model.last_result is not None:
-        message = model.last_result.message
-    elif model.transient_notice is not None:
-        message = model.transient_notice.message
+    if last_error is not None:
+        message = last_error.message
+        detail = last_error.detail
+        error_code = last_error.code
+    elif last_result is not None:
+        message = last_result.message
+    elif transient_notice is not None:
+        message = transient_notice.message
 
     terminal_outcome = model.terminal.outcome if model.terminal else None
     terminal_label = None
@@ -82,7 +129,7 @@ def view(model: TuiModel) -> ViewModel:
         terminal_label = "FAILURE"
 
     review_visible = bool(
-        model.prepared is not None
+        prepared is not None
         and active is not None
         and not active.execution_requested
         and active.phase in {
@@ -92,7 +139,7 @@ def view(model: TuiModel) -> ViewModel:
         and model.route is Route.REVIEW
     )
     confirmation_visible = bool(
-        model.prepared is not None
+        prepared is not None
         and active is not None
         and not active.execution_requested
         and active.phase is PersistentPhase.CONFIRMING
@@ -101,7 +148,7 @@ def view(model: TuiModel) -> ViewModel:
     confirmation_matches = bool(
         confirmation_visible
         and model.confirmation_input.strip()
-        == model.prepared.required_confirmation_phrase
+        == prepared.required_confirmation_phrase
     )
 
     return ViewModel(
@@ -111,8 +158,8 @@ def view(model: TuiModel) -> ViewModel:
         read_only=model.read_only,
         read_only_label=("READ ONLY" if model.read_only else None),
         read_only_reason=(
-            model.read_only_reason.message
-            if model.read_only_reason is not None
+            read_only_reason.message
+            if read_only_reason is not None
             else None
         ),
         operation_active=active is not None,
@@ -121,19 +168,19 @@ def view(model: TuiModel) -> ViewModel:
         persistent_kind=(
             active.persistent_kind
             if active is not None
-            else (model.prepared.kind if model.prepared is not None else None)
+            else (prepared.kind if prepared is not None else None)
         ),
         phase=phase,
         phase_label=(phase.value if phase is not None else None),
         review_visible=review_visible,
-        prepared=model.prepared,
+        prepared=prepared,
         review_acknowledged=model.review_acknowledged,
         confirmation_visible=confirmation_visible,
         confirmation_input=(
             model.confirmation_input if confirmation_visible else ""
         ),
         required_confirmation_phrase=(
-            model.prepared.required_confirmation_phrase
+            prepared.required_confirmation_phrase
             if review_visible or confirmation_visible
             else None
         ),
@@ -150,7 +197,7 @@ def view(model: TuiModel) -> ViewModel:
         detail=detail,
         help_open=model.help_open,
         disclosure_message=(
-            model.disclosure.message if model.disclosure is not None else None
+            disclosure.message if disclosure is not None else None
         ),
         progress_percent=None,
     )
