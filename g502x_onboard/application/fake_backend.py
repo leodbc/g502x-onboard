@@ -51,6 +51,14 @@ class FakeBackend:
     read_history: list[str] = field(default_factory=list)
     write_history: list[str] = field(default_factory=list)
     persistent_write_count: int = 0
+    firmware_supported: bool = True
+    persistent_policy_authorized: bool = True
+    post_validation_ok: bool = True
+    backup_targets: dict[str, dict[int, bytes]] = field(default_factory=dict, repr=False)
+    fault_at: str | None = None
+    block_at: str | None = None
+    block_entered: object | None = field(default=None, repr=False)
+    block_release: object | None = field(default=None, repr=False)
 
     def _compatibility(self) -> CompatibilityObservation:
         allowed = (
@@ -58,6 +66,8 @@ class FakeBackend:
             and self.stable_identity
             and self.architecture == "compatible"
             and self.transport == "tested"
+            and self.firmware_supported
+            and self.persistent_policy_authorized
         )
         return CompatibilityObservation(
             architecture=self.architecture,
@@ -532,6 +542,21 @@ class FakeBackend:
             sector_size=255,
             enabled_profiles=self.enabled_profiles,
             macro_starts=0,
+        )
+
+    def persistent_target(self, kind, source=None):
+        from ._fake_persistent import prepare_fake_target
+
+        return prepare_fake_target(self, kind, source)
+
+    def execute_persistent(self, intent, cancellation, phase_callback):
+        from ._fake_persistent import execute_fake_persistent
+
+        return execute_fake_persistent(
+            self,
+            intent,
+            cancellation,
+            phase_callback,
         )
 
     # Internal parity scaffolding only; no public facade method reaches these.

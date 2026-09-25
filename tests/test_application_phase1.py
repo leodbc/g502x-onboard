@@ -83,7 +83,6 @@ class ApplicationBoundaryTests(unittest.TestCase):
 
     def test_public_facade_has_no_persistent_execute_bypass(self):
         forbidden = {
-            "execute_prepared",
             "commit_prepared",
             "run_prepared",
             "apply_prepared",
@@ -94,6 +93,7 @@ class ApplicationBoundaryTests(unittest.TestCase):
             "restore_baseline_preserved",
         }
         self.assertTrue(forbidden.isdisjoint(dir(ApplicationFacade)))
+        self.assertTrue(callable(getattr(ApplicationFacade, "execute_prepared")))
 
     def test_application_package_init_has_no_backend_import(self):
         source = (ROOT / "g502x_onboard" / "application" / "__init__.py").read_text(encoding="utf-8")
@@ -233,7 +233,8 @@ class ApplicationModelPrivacyTests(unittest.TestCase):
 class ApplicationWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.backend = FakeBackend(fake_baseline())
-        self.app = ApplicationFacade(self.backend, id_factory=lambda: "prep-fixed")
+        ids = iter(f"prep-{id(self)}-{i}" for i in range(100))
+        self.app = ApplicationFacade(self.backend, id_factory=lambda: next(ids))
 
     def test_representative_read_only_workflows_use_backend(self):
         probe = self.app.probe()
@@ -298,13 +299,13 @@ class ApplicationWorkflowTests(unittest.TestCase):
 
         self.assertTrue(first.ok, first.error)
         prepared = first.value
-        self.assertEqual(prepared.preparation_id, "prep-fixed")
+        self.assertTrue(prepared.preparation_id.startswith(f"prep-{id(self)}-"))
         self.assertIs(prepared.kind, PersistentOperationKind.APPLY_CONFIG)
         self.assertEqual(prepared.required_confirmation_phrase, "APPLY CONFIG")
         self.assertIs(prepared.review.privacy, PrivacyClass.LOCAL_SENSITIVE)
-        self.assertIs(prepared.privacy, PrivacyClass.PRIVATE_DIAGNOSTIC)
-        self.assertEqual(prepared.active_baseline_binding, "baseline-fixture")
-        self.assertEqual(prepared.exact_unit_binding, "unit-fixture")
+        self.assertIs(prepared.privacy, PrivacyClass.LOCAL_SENSITIVE)
+        self.assertFalse(hasattr(prepared, "active_baseline_binding"))
+        self.assertFalse(hasattr(prepared, "exact_unit_binding"))
         self.assertIs(prepared.compatibility.eligibility, WriteEligibility.ELIGIBLE)
         self.assertEqual(
             prepared.review.managed_sectors,
@@ -316,6 +317,7 @@ class ApplicationWorkflowTests(unittest.TestCase):
         self.assertFalse(any("unit-fixture" in str(value) for value in prepared.review.__dict__.values()))
         self.assertNotIn("unit-fixture", repr(prepared))
         self.assertNotIn("baseline-fixture", repr(prepared))
+        self.assertNotIn("unit-fixture", repr(prepared))
         self.assertNotIn("WORK", repr(prepared))
         with self.assertRaises(FrozenInstanceError):
             prepared.plan_digest = "changed"

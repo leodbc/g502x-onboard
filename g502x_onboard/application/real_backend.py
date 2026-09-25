@@ -76,7 +76,7 @@ def _read_only(observed: CompatibilityObservation) -> CompatibilityObservation:
 
 
 class RealBackend:
-    """Sole Phase-1 application bridge to the existing synchronous device stack."""
+    """Sole application bridge to the existing synchronous device stack."""
 
     def probe(self) -> ProbeSnapshot:
         from ..device import probe_device
@@ -632,8 +632,17 @@ class RealBackend:
             macro_starts=len(validation.macro_starts),
         )
 
-    # Preserved persistent primitives are deliberately backend-internal in
-    # Phase 1. The public facade exposes no method that invokes these wrappers.
+    def persistent_target(self, kind, source=None):
+        from ._persistent_backend import prepare_real_target
+
+        return prepare_real_target(kind, source)
+
+    def execute_persistent(self, intent, cancellation, phase_callback):
+        from ._persistent_backend import execute_real_persistent
+
+        return execute_real_persistent(intent, cancellation, phase_callback)
+
+    # Preserved persistent primitives remain backend-internal parity scaffolding.
     def apply_plan_preserved(self, plan: dict, *, expected_baseline_fingerprint: str | None = None) -> Path:
         from ..device import apply_plan
 

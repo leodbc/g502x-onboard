@@ -120,22 +120,34 @@ class Phase2CliArchitectureTests(unittest.TestCase):
                 ]
                 self.assertEqual(direct_device_imports, [])
 
-    def test_only_phase3_deferred_commands_keep_legacy_persistent_authority(self):
-        expected = {
-            "cmd_apply": {"apply_plan", "active_manifest", "validate_device"},
-            "cmd_restore": {"load_backup", "restore_backup", "validate_device"},
-            "cmd_baseline_restore": {"restore_baseline", "validate_device"},
+    def test_phase3_persistent_commands_enter_through_public_facade(self):
+        forbidden_calls = {
+            "apply_plan",
+            "load_backup",
+            "restore_backup",
+            "restore_baseline",
+            "active_manifest",
+            "exclusive_operation_lock",
+            "validate_device",
         }
-        for name, required_calls in expected.items():
-            node = function_node(self.tree, name)
-            called = {
-                child.func.id
-                for child in ast.walk(node)
-                if isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Name)
-            }
-            self.assertTrue(required_calls.issubset(called))
-            self.assertNotIn("create_application", called)
+        for name in ("cmd_apply", "cmd_restore", "cmd_baseline_restore"):
+            with self.subTest(command=name):
+                node = function_node(self.tree, name)
+                called = {
+                    child.func.id
+                    for child in ast.walk(node)
+                    if isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name)
+                }
+                self.assertIn("create_application", called)
+                self.assertTrue(forbidden_calls.isdisjoint(called))
+                direct_device_imports = [
+                    child
+                    for child in ast.walk(node)
+                    if isinstance(child, ast.ImportFrom)
+                    and child.module == "device"
+                ]
+                self.assertEqual(direct_device_imports, [])
 
     def test_persistent_confirmation_literals_remain_exact(self):
         source = (ROOT / "g502x_onboard" / "cli.py").read_text(encoding="utf-8")
@@ -444,7 +456,6 @@ class Phase2ApplicationWorkflowTests(unittest.TestCase):
 
     def test_public_facade_has_no_persistent_execution_surface(self):
         forbidden = {
-            "execute_prepared",
             "commit_prepared",
             "run_prepared",
             "apply_prepared",
@@ -457,6 +468,7 @@ class Phase2ApplicationWorkflowTests(unittest.TestCase):
             "restore_baseline_preserved",
         }
         self.assertTrue(forbidden.isdisjoint(dir(ApplicationFacade)))
+        self.assertTrue(callable(getattr(ApplicationFacade, "execute_prepared")))
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from threading import Event
 from typing import Any, Generic, TypeVar
 
 
@@ -22,6 +23,10 @@ class ErrorCode(str, Enum):
     SAFETY_REFUSAL = "safety-refusal"
     BUSY = "busy"
     BACKEND_FAILURE = "backend-failure"
+    UNKNOWN_PREPARATION = "unknown-preparation"
+    CONSUMED_PREPARATION = "consumed-preparation"
+    STALE_PREPARATION = "stale-preparation"
+    CANCELLED = "cancelled"
 
 
 class WriteEligibility(str, Enum):
@@ -33,6 +38,36 @@ class PersistentOperationKind(str, Enum):
     APPLY_CONFIG = "apply-config"
     RESTORE_BACKUP = "restore-backup"
     RESTORE_BASELINE = "restore-baseline"
+
+
+class PersistentPhase(str, Enum):
+    PREPARING = "PREPARING"
+    PREPARED = "PREPARED"
+    REVIEWING = "REVIEWING"
+    CONFIRMING = "CONFIRMING"
+    REVALIDATING = "REVALIDATING"
+    ARMED = "ARMED"
+    WRITING = "WRITING"
+    RECONCILING = "RECONCILING"
+    POST_VALIDATING = "POST_VALIDATING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+class CancellationToken:
+    """Thread-safe cooperative cancellation request for application operations."""
+
+    __slots__ = ("_event",)
+
+    def __init__(self) -> None:
+        self._event = Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
 
 
 @dataclass(frozen=True)
@@ -120,29 +155,80 @@ class ProfileSwitchResult:
 @dataclass(frozen=True)
 class ApplyReview:
     config_name: str
+    config_path: str = field(repr=False)
     enabled_profiles: tuple[int, ...]
     profile_names: tuple[tuple[int, str], ...]
     managed_sectors: tuple[int, ...]
     warnings: tuple[str, ...]
     plan_digest: str
+    lines: tuple[str, ...] = field(default_factory=tuple, repr=False)
     privacy: PrivacyClass = PrivacyClass.LOCAL_SENSITIVE
 
 
 @dataclass(frozen=True)
+class RestoreBackupReview:
+    backup_name: str
+    managed_sectors: tuple[int, ...]
+    protected_sectors: tuple[int, ...]
+    target_digest: str
+    privacy: PrivacyClass = PrivacyClass.LOCAL_SENSITIVE
+
+
+@dataclass(frozen=True)
+class RestoreBaselineReview:
+    managed_sectors: tuple[int, ...]
+    protected_sectors: tuple[int, ...]
+    target_digest: str
+    privacy: PrivacyClass = PrivacyClass.LOCAL_SENSITIVE
+
+
+PersistentReview = ApplyReview | RestoreBackupReview | RestoreBaselineReview
+
+
+@dataclass(frozen=True)
 class PreparedOperation:
-    """Immutable Phase-1 review data; this object is not write authority."""
+    """Public reviewed capability; executable bindings remain application-private."""
 
     preparation_id: str
     kind: PersistentOperationKind
-    review: ApplyReview = field(repr=False)
-    plan_digest: str = field()
-    active_baseline_binding: str = field(repr=False)
-    exact_unit_binding: str = field(repr=False)
+    review: PersistentReview = field(repr=False)
+    target_digest: str
     compatibility: CompatibilityObservation
     observed_preconditions: tuple[str, ...]
     host_guard_clear: bool
     required_confirmation_phrase: str
-    privacy: PrivacyClass = PrivacyClass.PRIVATE_DIAGNOSTIC
+    phase: PersistentPhase = PersistentPhase.PREPARED
+    privacy: PrivacyClass = PrivacyClass.LOCAL_SENSITIVE
+
+    @property
+    def plan_digest(self) -> str:
+        """Compatibility alias for the apply target digest."""
+        return self.target_digest
+
+
+@dataclass(frozen=True)
+class PersistentPhaseSnapshot:
+    phase: PersistentPhase
+    kind: PersistentOperationKind
+    cancellation_allowed: bool
+    privacy: PrivacyClass = PrivacyClass.LOCAL_SENSITIVE
+
+
+@dataclass(frozen=True)
+class PersistentExecutionResult:
+    operation_kind: PersistentOperationKind
+    terminal_phase: PersistentPhase
+    success: bool
+    pre_write_status: str
+    writing_started: bool
+    reconciliation_completed: bool
+    post_validation_completed: bool
+    enabled_profiles: tuple[int, ...] = ()
+    safety_backup_name: str | None = None
+    error_code: ErrorCode | None = None
+    message: str = ""
+    phase_trace: tuple[PersistentPhase, ...] = ()
+    privacy: PrivacyClass = PrivacyClass.LOCAL_SENSITIVE
 
 
 @dataclass(frozen=True)

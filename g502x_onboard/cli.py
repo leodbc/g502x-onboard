@@ -11,8 +11,6 @@ from .application import ErrorCode, PrivacyClass, create_application
 from .baseline import (
     DEFAULT_INDEX,
     DEFAULT_PID,
-    HOME as STATE_HOME,
-    active_manifest,
 )
 from .codec import (
     build_plan,
@@ -34,13 +32,11 @@ from .constants import (
     SECTOR_COUNT,
     SECTOR_SIZE,
 )
-from .storage import ROOT, baseline_map
-from .private_io import atomic_local_write_text, exclusive_operation_lock, private_mkdir, private_write_text
-from .validator import validate_device
+from .storage import ROOT
+from .private_io import atomic_local_write_text, private_mkdir, private_write_text
 
 
 SCHEMA_PATH = ROOT / "g502x_onboard" / "config.schema.json"
-OPERATION_LOCK = STATE_HOME / "operation.lock"
 
 
 def _int_auto(value: str) -> int:
@@ -61,18 +57,6 @@ def _app_value(result, *, expose_private_detail: bool = False):
     ):
         message = f"PRIVATE diagnostic: {result.error.detail}"
     raise RuntimeError(message)
-
-
-def _load_plan(path: str):
-    config_path, config = load_config(path)
-    try:
-        baseline = baseline_map()
-    except Exception as exc:
-        raise RuntimeError(
-            "planning for a physical device requires an active local baseline. "
-            "Run probe and then setup first."
-        ) from exc
-    return config_path, config, build_plan(config, baseline)
 
 
 def _print_plan(path: Path, plan: dict) -> None:
@@ -530,16 +514,10 @@ def cmd_capacity(args):
 
 
 def cmd_apply(args):
-    from .device import apply_plan
-
-    # Planning inherits bytes from the active local baseline. Bind the visible
-    # plan to that exact baseline so a baseline-use in another process while the
-    # human reviews the plan cannot silently change the template underneath it.
-    with exclusive_operation_lock(OPERATION_LOCK):
-        planned_baseline_fp = active_manifest()["fingerprint"]
-        path, config, plan = _load_plan(args.config)
-
-    _print_plan(path, plan)
+    app = create_application()
+    prepared = _app_value(app.prepare_apply(args.config))
+    for line in prepared.review.lines:
+        print(line)
     print()
     print("Managed domain: Sector 0, Profiles 2-5, macro sectors 8-15.")
     print("Profile 1 + recovery sectors 6/7 are immutable.")
@@ -548,39 +526,15 @@ def cmd_apply(args):
         print("Cancelled.")
         return
 
-    with exclusive_operation_lock(OPERATION_LOCK):
-        current_baseline_fp = active_manifest()["fingerprint"]
-        if current_baseline_fp != planned_baseline_fp:
-            raise RuntimeError(
-                "active baseline changed after the plan was compiled; "
-                "refusing to apply stale inherited bytes. Re-run plan/apply."
-            )
-
-        backup = apply_plan(
-            plan,
-            expected_baseline_fingerprint=planned_baseline_fp,
-        )
-        _images, report = validate_device()
-        if not report.ok:
-            raise RuntimeError(
-                "post-apply validation failed:\n  " + "\n  ".join(report.errors)
-            )
-
-        private_write_text(
-            backup / "intended-plan.json",
-            plan_json(plan),
-        )
-        private_write_text(
-            backup / "source-config.normalized.json",
-            json.dumps(config, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        )
+    execution = _app_value(app.execute_prepared(prepared, phrase))
+    if not execution.success:
+        raise RuntimeError(execution.message)
 
     print()
     print("CONFIG APPLIED AND FULLY VALIDATED.")
-    print("Enabled: " + ", ".join(map(str, report.enabled_profiles)))
-    print(f"Pre-apply backup: {backup.name} (private state)")
+    print("Enabled: " + ", ".join(map(str, execution.enabled_profiles)))
+    print(f"Pre-apply backup: {execution.safety_backup_name} (private state)")
     print("Profile 1 SAFE remained active.")
-
 
 def cmd_validate(args):
     value = _app_value(
@@ -782,47 +736,44 @@ def cmd_backup(args):
 
 
 def cmd_restore(args):
-    from .device import load_backup, restore_backup
-
-    root, _images, _manifest = load_backup(args.backup)
-    print(f"Backup: {root.name} (private state)")
+    app = create_application()
+    prepared = _app_value(app.prepare_restore_backup(args.backup))
+    print(f"Backup: {prepared.review.backup_name} (private state)")
     print("Only the programmable domain will be restored.")
     print("Profile 1 and recovery sectors 6/7 will never be written.")
-    if input("Type exactly RESTORE BACKUP: ").strip() != "RESTORE BACKUP":
+    phrase = input("Type exactly RESTORE BACKUP: ").strip()
+    if phrase != "RESTORE BACKUP":
         print("Cancelled.")
         return
-    with exclusive_operation_lock(OPERATION_LOCK):
-        safety = restore_backup(root)
-        _images, report = validate_device()
-        if not report.ok:
-            raise RuntimeError(
-                "post-restore validation failed:\n  " + "\n  ".join(report.errors)
-            )
+    execution = _app_value(app.execute_prepared(prepared, phrase))
+    if not execution.success:
+        raise RuntimeError(execution.message)
     print("RESTORE COMPLETE AND VALIDATED.")
-    print(f"Pre-restore safety backup: {safety.name} (private state)")
-
+    print(
+        f"Pre-restore safety backup: "
+        f"{execution.safety_backup_name} (private state)"
+    )
 
 def cmd_baseline_restore(_args):
-    from .device import restore_baseline
-
+    app = create_application()
+    prepared = _app_value(app.prepare_restore_baseline())
     print(
         "This restores Sector 0, Profiles 2-5 and sectors 8-15 to the "
         "active device baseline captured during setup."
     )
     print("Profile 1 and sectors 6/7 remain protected.")
-    if input("Type exactly RESTORE BASELINE: ").strip() != "RESTORE BASELINE":
+    phrase = input("Type exactly RESTORE BASELINE: ").strip()
+    if phrase != "RESTORE BASELINE":
         print("Cancelled.")
         return
-    with exclusive_operation_lock(OPERATION_LOCK):
-        safety = restore_baseline()
-        _images, report = validate_device()
-        if not report.ok:
-            raise RuntimeError(
-                "post-reset validation failed:\n  " + "\n  ".join(report.errors)
-            )
+    execution = _app_value(app.execute_prepared(prepared, phrase))
+    if not execution.success:
+        raise RuntimeError(execution.message)
     print("LOCAL BASELINE PROGRAMMABLE STATE RESTORED.")
-    print(f"Pre-reset safety backup: {safety.name} (private state)")
-
+    print(
+        f"Pre-reset safety backup: "
+        f"{execution.safety_backup_name} (private state)"
+    )
 
 def cmd_capabilities(args):
     rows = [
