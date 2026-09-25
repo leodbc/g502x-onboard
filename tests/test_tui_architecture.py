@@ -20,7 +20,17 @@ class TuiArchitectureTests(unittest.TestCase):
 
     def test_phase4_package_uses_no_forbidden_import_or_escape_hatch(self):
         forbidden_import_roots = {
-            "hid", "libs", "subprocess", "runpy", "importlib", "textual", "rich"
+            "asyncio",
+            "concurrent",
+            "hid",
+            "importlib",
+            "libs",
+            "multiprocessing",
+            "runpy",
+            "subprocess",
+            "textual",
+            "threading",
+            "rich",
         }
         forbidden_import_prefixes = (
             "g502x_onboard.device",
@@ -32,6 +42,11 @@ class TuiArchitectureTests(unittest.TestCase):
             "RealBackend", "FakeBackend", "ApplicationFacade", "__import__"
         }
         forbidden_calls = {
+            "__import__",
+            "builtins.__import__",
+            "eval",
+            "exec",
+            "os.popen",
             "os.system",
             "subprocess.run",
             "subprocess.Popen",
@@ -71,6 +86,10 @@ class TuiArchitectureTests(unittest.TestCase):
                 elif isinstance(node, ast.Name):
                     self.assertNotIn(
                         node.id, forbidden_names, (path, node.id)
+                    )
+                elif isinstance(node, ast.Attribute):
+                    self.assertNotEqual(
+                        node.attr, "__import__", (path, node.attr)
                     )
                 elif isinstance(node, ast.Call):
                     target = self._call_name(node.func)
