@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, replace
 import hashlib
+from itertools import count
 import json
 from pathlib import Path
 from threading import Lock
@@ -49,10 +51,117 @@ class _IssuedPreparation:
     public: PreparedOperation
     intent: PersistentBackendIntent
     consumed: bool = False
+    executing: bool = False
 
 
+@dataclass(frozen=True)
+class _PreparationTombstone:
+    owner: weakref.ReferenceType
+    consumed: bool
+
+
+_MAX_ACTIVE_PREPARATIONS = 32
+_MAX_PREPARATION_TOMBSTONES = 128
+_ISSUANCE_SERIAL = count()
 _REGISTRY_LOCK = Lock()
-_PREPARATIONS: dict[str, _IssuedPreparation] = {}
+_PREPARATIONS: OrderedDict[str, _IssuedPreparation] = OrderedDict()
+_TOMBSTONES: OrderedDict[str, _PreparationTombstone] = OrderedDict()
+
+
+def _issued_preparation_id(candidate: str) -> str:
+    # The injected id_factory is intentionally deterministic/testable. Add a
+    # process-local issuance generation so a repeated factory value can never
+    # make an old PreparedOperation equal a later issuance after compaction.
+    return f"{candidate}#{next(_ISSUANCE_SERIAL):016x}"
+
+
+def _trim_tombstones_locked() -> None:
+    while len(_TOMBSTONES) > _MAX_PREPARATION_TOMBSTONES:
+        _TOMBSTONES.popitem(last=False)
+
+
+def _add_tombstone_locked(
+    preparation_id: str,
+    owner: weakref.ReferenceType,
+    *,
+    consumed: bool,
+) -> None:
+    _TOMBSTONES[preparation_id] = _PreparationTombstone(
+        owner=owner,
+        consumed=consumed,
+    )
+    _TOMBSTONES.move_to_end(preparation_id)
+    _trim_tombstones_locked()
+
+
+def _retire_locked(
+    preparation_id: str,
+    record: _IssuedPreparation,
+    *,
+    consumed: bool | None = None,
+) -> None:
+    current = _PREPARATIONS.get(preparation_id)
+    if current is not record:
+        return
+    del _PREPARATIONS[preparation_id]
+    _add_tombstone_locked(
+        preparation_id,
+        record.owner,
+        consumed=record.consumed if consumed is None else consumed,
+    )
+
+
+def _reclaim_dead_locked() -> None:
+    # Weak owner references prevent facade lifetime extension. Once the owner is
+    # gone, no full/private payload needs to remain reachable from the registry.
+    for preparation_id, record in list(_PREPARATIONS.items()):
+        if record.owner() is None and not record.executing:
+            del _PREPARATIONS[preparation_id]
+    for preparation_id, tombstone in list(_TOMBSTONES.items()):
+        if tombstone.owner() is None:
+            del _TOMBSTONES[preparation_id]
+
+
+def _make_active_room_locked() -> bool:
+    _reclaim_dead_locked()
+    while len(_PREPARATIONS) >= _MAX_ACTIVE_PREPARATIONS:
+        retired = False
+        for preparation_id, record in list(_PREPARATIONS.items()):
+            if record.executing:
+                continue
+            _retire_locked(preparation_id, record)
+            retired = True
+            break
+        if not retired:
+            return False
+    return True
+
+
+def _retired_terminal(
+    owner,
+    prepared: PreparedOperation,
+    trace: list[PersistentPhase] | tuple[PersistentPhase, ...],
+):
+    tombstone = _TOMBSTONES.get(prepared.preparation_id)
+    if tombstone is None or tombstone.owner() is not owner:
+        return None
+    if tombstone.consumed:
+        return _terminal(
+            prepared,
+            success=False,
+            status="consumed-preparation",
+            error_code=ErrorCode.CONSUMED_PREPARATION,
+            message="preparation has already been consumed; prepare again",
+            trace=trace,
+        )
+    return _terminal(
+        prepared,
+        success=False,
+        status="stale-preparation",
+        error_code=ErrorCode.STALE_PREPARATION,
+        message="preparation has been retired; prepare again",
+        trace=trace,
+    )
 
 
 def _failure(code: ErrorCode, message: str, privacy: PrivacyClass) -> OperationResult:
@@ -221,18 +330,31 @@ def _apply_review_lines(path: Path, plan: dict) -> tuple[str, ...]:
 
 def _register(owner, public: PreparedOperation, intent: PersistentBackendIntent):
     with _REGISTRY_LOCK:
-        if public.preparation_id in _PREPARATIONS:
+        if not _make_active_room_locked():
+            return _failure(
+                ErrorCode.BUSY,
+                "preparation registry is temporarily full; retry",
+                PrivacyClass.SHAREABLE,
+            )
+        issued = replace(
+            public,
+            preparation_id=_issued_preparation_id(public.preparation_id),
+        )
+        if (
+            issued.preparation_id in _PREPARATIONS
+            or issued.preparation_id in _TOMBSTONES
+        ):
             return _failure(
                 ErrorCode.BACKEND_FAILURE,
-                "preparation id collision; prepare again",
+                "preparation issuance collision; prepare again",
                 PrivacyClass.PRIVATE_DIAGNOSTIC,
             )
-        _PREPARATIONS[public.preparation_id] = _IssuedPreparation(
+        _PREPARATIONS[issued.preparation_id] = _IssuedPreparation(
             owner=weakref.ref(owner),
-            public=public,
+            public=issued,
             intent=intent,
         )
-    return OperationResult(ok=True, value=public, privacy=public.privacy)
+    return OperationResult(ok=True, value=issued, privacy=issued.privacy)
 
 
 def prepare_apply(
@@ -417,6 +539,152 @@ def prepare_restore_baseline(
     )
 
 
+def _execute_accepted(
+    backend: Backend,
+    prepared: PreparedOperation,
+    intent: PersistentBackendIntent,
+    token: CancellationToken,
+    trace: list[PersistentPhase],
+    observer: Callable[[PersistentPhaseSnapshot], None] | None,
+) -> OperationResult[PersistentExecutionResult]:
+    def emit(phase: PersistentPhase) -> None:
+        if not trace or trace[-1] is not phase:
+            trace.append(phase)
+        if observer is not None:
+            try:
+                observer(
+                    PersistentPhaseSnapshot(
+                        phase=phase,
+                        kind=prepared.kind,
+                        cancellation_allowed=phase in {
+                            PersistentPhase.PREPARING,
+                            PersistentPhase.PREPARED,
+                            PersistentPhase.REVIEWING,
+                            PersistentPhase.CONFIRMING,
+                            PersistentPhase.REVALIDATING,
+                            PersistentPhase.ARMED,
+                        },
+                    )
+                )
+            except Exception:
+                pass
+
+    emit(PersistentPhase.REVALIDATING)
+    if token.is_cancelled:
+        return _terminal(
+            prepared,
+            success=False,
+            status="cancelled-before-write",
+            error_code=ErrorCode.CANCELLED,
+            message="operation cancelled during revalidation",
+            trace=trace,
+        )
+
+    try:
+        value = backend.execute_persistent(intent, token, emit)
+    except CooperativeCancellationError:
+        return _terminal(
+            prepared,
+            success=False,
+            status="cancelled-before-write",
+            error_code=ErrorCode.CANCELLED,
+            message="operation cancelled before the first persistent write",
+            trace=trace,
+            writing_started=PersistentPhase.WRITING in trace,
+        )
+    except PersistentBackendFailure as exc:
+        reconciled = bool(exc.reconciliation_completed)
+        post_validated = bool(exc.post_validation_completed) and reconciled
+        return _terminal(
+            prepared,
+            success=False,
+            status=(
+                "failed-after-write"
+                if PersistentPhase.WRITING in trace
+                else "revalidation-refused"
+            ),
+            error_code=ErrorCode.BACKEND_FAILURE,
+            message="persistent operation refused or failed",
+            trace=trace,
+            writing_started=PersistentPhase.WRITING in trace,
+            reconciliation_completed=reconciled,
+            post_validation_completed=post_validated,
+        )
+    except Exception:
+        return _terminal(
+            prepared,
+            success=False,
+            status=(
+                "failed-after-write"
+                if PersistentPhase.WRITING in trace
+                else "revalidation-refused"
+            ),
+            error_code=ErrorCode.BACKEND_FAILURE,
+            message="persistent operation refused or failed",
+            trace=trace,
+            writing_started=PersistentPhase.WRITING in trace,
+            reconciliation_completed=False,
+            post_validation_completed=False,
+        )
+
+    reconciled = bool(value.reconciliation_completed)
+    post_validated = bool(value.post_validation_completed) and reconciled
+    required_success_phases = (
+        PersistentPhase.ARMED,
+        PersistentPhase.WRITING,
+        PersistentPhase.RECONCILING,
+        PersistentPhase.POST_VALIDATING,
+    )
+    lifecycle_complete = all(phase in trace for phase in required_success_phases)
+    if not (reconciled and post_validated and lifecycle_complete):
+        return _terminal(
+            prepared,
+            success=False,
+            status=(
+                "failed-after-write"
+                if PersistentPhase.WRITING in trace
+                else "revalidation-refused"
+            ),
+            error_code=ErrorCode.BACKEND_FAILURE,
+            message="persistent operation refused or failed",
+            trace=trace,
+            writing_started=PersistentPhase.WRITING in trace,
+            reconciliation_completed=reconciled,
+            post_validation_completed=post_validated,
+        )
+
+    return _terminal(
+        prepared,
+        success=True,
+        status="completed",
+        error_code=None,
+        message="persistent operation completed and fully validated",
+        trace=trace,
+        writing_started=True,
+        reconciliation_completed=True,
+        post_validation_completed=True,
+        enabled_profiles=value.enabled_profiles,
+        safety_backup_name=value.safety_backup_name,
+    )
+
+
+def _finish_accepted_record(
+    preparation_id: str,
+    accepted_record: _IssuedPreparation,
+) -> None:
+    with _REGISTRY_LOCK:
+        current = _PREPARATIONS.get(preparation_id)
+        accepted_record.executing = False
+        if current is accepted_record:
+            _retire_locked(
+                preparation_id,
+                accepted_record,
+                consumed=True,
+            )
+        _reclaim_dead_locked()
+        _trim_tombstones_locked()
+
+
 def execute_prepared(
     owner,
     backend: Backend,
@@ -450,8 +718,21 @@ def execute_prepared(
         )
 
     with _REGISTRY_LOCK:
+        _reclaim_dead_locked()
         record = _PREPARATIONS.get(prepared.preparation_id)
-        if record is None or record.owner() is not owner:
+        if record is None:
+            retired = _retired_terminal(owner, prepared, trace)
+            if retired is not None:
+                return retired
+            return _terminal(
+                prepared,
+                success=False,
+                status="unknown-preparation",
+                error_code=ErrorCode.UNKNOWN_PREPARATION,
+                message="preparation was not issued by this application",
+                trace=trace,
+            )
+        if record.owner() is not owner:
             return _terminal(
                 prepared,
                 success=False,
@@ -480,19 +761,28 @@ def execute_prepared(
             )
 
     try:
-        # Use the coordinator as a real context manager.  Once __enter__ has
+        # Use the coordinator as a real context manager. Once __enter__ has
         # acquired the process-wide claim, Python establishes __exit__ cleanup
-        # before any accepted-execution code runs.  BaseException (including
-        # KeyboardInterrupt/SystemExit) still propagates, but cannot strand
-        # _PROCESS_LOCK in a surviving process.
+        # before any accepted-execution code runs. BaseException (including
+        # KeyboardInterrupt/SystemExit) still propagates and the accepted record
+        # is retired in the finally block below without catching BaseException.
         with coordinator.claim():
             with _REGISTRY_LOCK:
+                _reclaim_dead_locked()
                 record = _PREPARATIONS.get(prepared.preparation_id)
-                if (
-                    record is None
-                    or record.owner() is not owner
-                    or prepared != record.public
-                ):
+                if record is None:
+                    retired = _retired_terminal(owner, prepared, trace)
+                    if retired is not None:
+                        return retired
+                    return _terminal(
+                        prepared,
+                        success=False,
+                        status="stale-preparation",
+                        error_code=ErrorCode.STALE_PREPARATION,
+                        message="preparation changed before execution claim",
+                        trace=trace,
+                    )
+                if record.owner() is not owner or prepared != record.public:
                     return _terminal(
                         prepared,
                         success=False,
@@ -511,131 +801,36 @@ def execute_prepared(
                         trace=trace,
                     )
                 record.consumed = True
+                record.executing = True
                 intent = record.intent
-
-            def emit(phase: PersistentPhase) -> None:
-                if not trace or trace[-1] is not phase:
-                    trace.append(phase)
-                if observer is not None:
-                    try:
-                        observer(
-                            PersistentPhaseSnapshot(
-                                phase=phase,
-                                kind=prepared.kind,
-                                cancellation_allowed=phase in {
-                                    PersistentPhase.PREPARING,
-                                    PersistentPhase.PREPARED,
-                                    PersistentPhase.REVIEWING,
-                                    PersistentPhase.CONFIRMING,
-                                    PersistentPhase.REVALIDATING,
-                                    PersistentPhase.ARMED,
-                                },
-                            )
-                        )
-                    except Exception:
-                        pass
-
-            emit(PersistentPhase.REVALIDATING)
-            if token.is_cancelled:
-                return _terminal(
-                    prepared,
-                    success=False,
-                    status="cancelled-before-write",
-                    error_code=ErrorCode.CANCELLED,
-                    message="operation cancelled during revalidation",
-                    trace=trace,
-                )
+                accepted_record = record
 
             try:
-                value = backend.execute_persistent(intent, token, emit)
-            except CooperativeCancellationError:
-                return _terminal(
+                return _execute_accepted(
+                    backend,
                     prepared,
-                    success=False,
-                    status="cancelled-before-write",
-                    error_code=ErrorCode.CANCELLED,
-                    message="operation cancelled before the first persistent write",
-                    trace=trace,
-                    writing_started=PersistentPhase.WRITING in trace,
+                    intent,
+                    token,
+                    trace,
+                    observer,
                 )
-            except PersistentBackendFailure as exc:
-                reconciled = bool(exc.reconciliation_completed)
-                post_validated = bool(exc.post_validation_completed) and reconciled
-                return _terminal(
-                    prepared,
-                    success=False,
-                    status=(
-                        "failed-after-write"
-                        if PersistentPhase.WRITING in trace
-                        else "revalidation-refused"
-                    ),
-                    error_code=ErrorCode.BACKEND_FAILURE,
-                    message="persistent operation refused or failed",
-                    trace=trace,
-                    writing_started=PersistentPhase.WRITING in trace,
-                    reconciliation_completed=reconciled,
-                    post_validation_completed=post_validated,
+            finally:
+                _finish_accepted_record(
+                    prepared.preparation_id,
+                    accepted_record,
                 )
-            except Exception:
-                return _terminal(
-                    prepared,
-                    success=False,
-                    status=(
-                        "failed-after-write"
-                        if PersistentPhase.WRITING in trace
-                        else "revalidation-refused"
-                    ),
-                    error_code=ErrorCode.BACKEND_FAILURE,
-                    message="persistent operation refused or failed",
-                    trace=trace,
-                    writing_started=PersistentPhase.WRITING in trace,
-                    reconciliation_completed=False,
-                    post_validation_completed=False,
-                )
-
-            reconciled = bool(value.reconciliation_completed)
-            post_validated = bool(value.post_validation_completed) and reconciled
-            required_success_phases = (
-                PersistentPhase.ARMED,
-                PersistentPhase.WRITING,
-                PersistentPhase.RECONCILING,
-                PersistentPhase.POST_VALIDATING,
-            )
-            lifecycle_complete = all(phase in trace for phase in required_success_phases)
-            if not (reconciled and post_validated and lifecycle_complete):
-                return _terminal(
-                    prepared,
-                    success=False,
-                    status=(
-                        "failed-after-write"
-                        if PersistentPhase.WRITING in trace
-                        else "revalidation-refused"
-                    ),
-                    error_code=ErrorCode.BACKEND_FAILURE,
-                    message="persistent operation refused or failed",
-                    trace=trace,
-                    writing_started=PersistentPhase.WRITING in trace,
-                    reconciliation_completed=reconciled,
-                    post_validation_completed=post_validated,
-                )
-
-            return _terminal(
-                prepared,
-                success=True,
-                status="completed",
-                error_code=None,
-                message="persistent operation completed and fully validated",
-                trace=trace,
-                writing_started=True,
-                reconciliation_completed=True,
-                post_validation_completed=True,
-                enabled_profiles=value.enabled_profiles,
-                safety_backup_name=value.safety_backup_name,
-            )
     except OperationBusyError:
         with _REGISTRY_LOCK:
             record = _PREPARATIONS.get(prepared.preparation_id)
-            consumed = bool(record and record.consumed)
+            tombstone = _TOMBSTONES.get(prepared.preparation_id)
+            consumed = bool(
+                (record and record.consumed)
+                or (
+                    tombstone
+                    and tombstone.owner() is owner
+                    and tombstone.consumed
+                )
+            )
         return _terminal(
             prepared,
             success=False,
