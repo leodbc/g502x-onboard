@@ -37,7 +37,6 @@ class OperationAction(str, Enum):
     VALIDATE = "validate"
     PROFILE_SWITCH = "profile-switch"
     PREPARE_PERSISTENT = "prepare-persistent"
-    EXECUTE_PREPARED = "execute-prepared"
     REFRESH = "refresh"
 
 
