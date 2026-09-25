@@ -73,16 +73,12 @@ Event = (
     | RefreshRequested
 )
 
-_PHASE_ORDER = {
-    PersistentPhase.PREPARING: 0,
-    PersistentPhase.PREPARED: 1,
-    PersistentPhase.REVIEWING: 2,
-    PersistentPhase.CONFIRMING: 3,
-    PersistentPhase.REVALIDATING: 4,
-    PersistentPhase.ARMED: 5,
-    PersistentPhase.WRITING: 6,
-    PersistentPhase.RECONCILING: 7,
-    PersistentPhase.POST_VALIDATING: 8,
+_PROGRESS_NEXT = {
+    PersistentPhase.CONFIRMING: PersistentPhase.REVALIDATING,
+    PersistentPhase.REVALIDATING: PersistentPhase.ARMED,
+    PersistentPhase.ARMED: PersistentPhase.WRITING,
+    PersistentPhase.WRITING: PersistentPhase.RECONCILING,
+    PersistentPhase.RECONCILING: PersistentPhase.POST_VALIDATING,
 }
 
 
@@ -142,10 +138,10 @@ def _accept_progress(
     if current in {PersistentPhase.SUCCEEDED, PersistentPhase.FAILED}:
         return False
     if current is None:
-        return True
-    if current not in _PHASE_ORDER or new not in _PHASE_ORDER:
         return False
-    return _PHASE_ORDER[new] >= _PHASE_ORDER[current]
+    if new is current:
+        return True
+    return _PROGRESS_NEXT.get(current) is new
 
 
 def _terminal_payload(
