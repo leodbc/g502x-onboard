@@ -649,28 +649,22 @@ class TuiStateEngineTests(unittest.TestCase):
             model, ConfirmationChanged(self.op, "APPLY CONFIG")
         )
         model, _ = update(model, ConfirmationSubmitted(self.op))
-        model, _ = update(
-            model,
-            PersistentProgress(
-                self.op,
-                PersistentPhaseSnapshot(
-                    PersistentPhase.REVALIDATING,
-                    PersistentOperationKind.APPLY_CONFIG,
-                    True,
+        for phase in (
+            PersistentPhase.REVALIDATING,
+            PersistentPhase.ARMED,
+        ):
+            model, _ = update(
+                model,
+                PersistentProgress(
+                    self.op,
+                    PersistentPhaseSnapshot(
+                        phase,
+                        PersistentOperationKind.APPLY_CONFIG,
+                        True,
+                    ),
                 ),
-            ),
-        )
-        model, _ = update(
-            model,
-            PersistentProgress(
-                self.op,
-                PersistentPhaseSnapshot(
-                    PersistentPhase.ARMED,
-                    PersistentOperationKind.APPLY_CONFIG,
-                    True,
-                ),
-            ),
-        )
+            )
+        self.assertEqual(model.active.phase, PersistentPhase.ARMED)
         model, effects = update(
             model, CancellationRequested(self.op)
         )
@@ -712,6 +706,7 @@ class TuiStateEngineTests(unittest.TestCase):
                 ),
             ),
         )
+        self.assertEqual(model.active.phase, PersistentPhase.ARMED)
         model, effects = update(
             model, CancellationRequested(self.op)
         )
