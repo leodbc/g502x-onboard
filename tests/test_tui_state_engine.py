@@ -1260,6 +1260,32 @@ class TuiStateEngineTests(unittest.TestCase):
                 self.assertEqual(after, model)
                 self.assertEqual(effects, ())
 
+    def test_execution_never_exposes_review_or_confirmation_controls(self):
+        for phase in (
+            PersistentPhase.CONFIRMING,
+            PersistentPhase.REVALIDATING,
+            PersistentPhase.ARMED,
+            PersistentPhase.WRITING,
+            PersistentPhase.RECONCILING,
+            PersistentPhase.POST_VALIDATING,
+        ):
+            model = self.execution_model(phase)
+            for route in (Route.REVIEW, Route.CONFIRMATION):
+                routed, _ = update(model, Navigate(route))
+                vm = view(routed)
+                with self.subTest(phase=phase, route=route):
+                    self.assertFalse(vm.review_visible)
+                    self.assertFalse(vm.confirmation_visible)
+                    self.assertEqual(vm.confirmation_input, "")
+                    self.assertIsNone(vm.required_confirmation_phrase)
+                    self.assertFalse(vm.confirmation_matches)
+                    if phase in {
+                        PersistentPhase.WRITING,
+                        PersistentPhase.RECONCILING,
+                        PersistentPhase.POST_VALIDATING,
+                    }:
+                        self.assertTrue(vm.non_cancellable)
+
     def test_confirmation_submit_requires_exact_current_phrase(self):
         model = self.prepared_model()
         model, _ = update(model, EnterReview(self.op))
