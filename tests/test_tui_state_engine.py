@@ -643,6 +643,23 @@ class TuiStateEngineTests(unittest.TestCase):
 
     def test_cancellation_still_permitted_at_armed(self):
         model = self.prepared_model()
+        model, _ = update(model, EnterReview(self.op))
+        model, _ = update(model, ReviewAcknowledged(self.op, True))
+        model, _ = update(
+            model, ConfirmationChanged(self.op, "APPLY CONFIG")
+        )
+        model, _ = update(model, ConfirmationSubmitted(self.op))
+        model, _ = update(
+            model,
+            PersistentProgress(
+                self.op,
+                PersistentPhaseSnapshot(
+                    PersistentPhase.REVALIDATING,
+                    PersistentOperationKind.APPLY_CONFIG,
+                    True,
+                ),
+            ),
+        )
         model, _ = update(
             model,
             PersistentProgress(
@@ -667,6 +684,23 @@ class TuiStateEngineTests(unittest.TestCase):
 
     def test_application_cancellation_flag_fails_closed(self):
         model = self.prepared_model()
+        model, _ = update(model, EnterReview(self.op))
+        model, _ = update(model, ReviewAcknowledged(self.op, True))
+        model, _ = update(
+            model, ConfirmationChanged(self.op, "APPLY CONFIG")
+        )
+        model, _ = update(model, ConfirmationSubmitted(self.op))
+        model, _ = update(
+            model,
+            PersistentProgress(
+                self.op,
+                PersistentPhaseSnapshot(
+                    PersistentPhase.REVALIDATING,
+                    PersistentOperationKind.APPLY_CONFIG,
+                    True,
+                ),
+            ),
+        )
         model, _ = update(
             model,
             PersistentProgress(
