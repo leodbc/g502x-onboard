@@ -773,40 +773,54 @@ class TuiStateEngineTests(unittest.TestCase):
         self.assertIsNone(after.terminal)
 
     def test_generic_failure_does_not_drop_non_cancellable_transaction(self):
-        model = self.writing_model()
-        after, effects = update(
-            model,
-            ApplicationFailed(
-                self.op,
-                ApplicationError(
-                    ErrorCode.BACKEND_FAILURE,
-                    "generic worker failure",
-                    PrivacyClass.SHAREABLE,
+        for phase in (
+            PersistentPhase.WRITING,
+            PersistentPhase.RECONCILING,
+            PersistentPhase.POST_VALIDATING,
+        ):
+            model = self.execution_model(phase)
+            after, effects = update(
+                model,
+                ApplicationFailed(
+                    self.op,
+                    ApplicationError(
+                        ErrorCode.BACKEND_FAILURE,
+                        "generic worker failure",
+                        PrivacyClass.SHAREABLE,
+                    ),
                 ),
-            ),
-        )
-        self.assertEqual(after, model)
-        self.assertEqual(effects, ())
-        self.assertEqual(after.active.phase, PersistentPhase.WRITING)
-        self.assertIsNone(after.terminal)
+            )
+            with self.subTest(phase=phase):
+                self.assertEqual(after, model)
+                self.assertEqual(effects, ())
+                self.assertEqual(after.active.phase, phase)
+                self.assertTrue(view(after).non_cancellable)
+                self.assertIsNone(after.terminal)
 
     def test_invalidation_does_not_drop_non_cancellable_transaction(self):
-        model = self.writing_model()
-        after, effects = update(
-            model,
-            PreparationInvalidated(
-                self.op,
-                ApplicationError(
-                    ErrorCode.STALE_PREPARATION,
-                    "stale",
-                    PrivacyClass.LOCAL_SENSITIVE,
+        for phase in (
+            PersistentPhase.WRITING,
+            PersistentPhase.RECONCILING,
+            PersistentPhase.POST_VALIDATING,
+        ):
+            model = self.execution_model(phase)
+            after, effects = update(
+                model,
+                PreparationInvalidated(
+                    self.op,
+                    ApplicationError(
+                        ErrorCode.STALE_PREPARATION,
+                        "stale",
+                        PrivacyClass.LOCAL_SENSITIVE,
+                    ),
                 ),
-            ),
-        )
-        self.assertEqual(after, model)
-        self.assertEqual(effects, ())
-        self.assertEqual(after.active.phase, PersistentPhase.WRITING)
-        self.assertIsNone(after.terminal)
+            )
+            with self.subTest(phase=phase):
+                self.assertEqual(after, model)
+                self.assertEqual(effects, ())
+                self.assertEqual(after.active.phase, phase)
+                self.assertTrue(view(after).non_cancellable)
+                self.assertIsNone(after.terminal)
 
     def test_terminal_result_accepted_after_writing_cancel_request(self):
         model = self.writing_model()
@@ -1463,6 +1477,26 @@ class TuiStateEngineTests(unittest.TestCase):
         self.assertEqual(
             after.surface_privacy, PrivacyClass.SHAREABLE
         )
+
+
+    def test_terminal_replay_is_ignored_after_operation_is_released(self):
+        model = self.execution_model(PersistentPhase.POST_VALIDATING)
+        result = persistent_result(
+            success=True,
+            terminal_phase=PersistentPhase.SUCCEEDED,
+            writing_started=True,
+            reconciled=True,
+            post_validated=True,
+        )
+        terminal, _ = update(
+            model, PersistentCompleted(self.op, result)
+        )
+        self.assertIsNone(terminal.active)
+        replay, effects = update(
+            terminal, PersistentCompleted(self.op, result)
+        )
+        self.assertEqual(replay, terminal)
+        self.assertEqual(effects, ())
 
 
 if __name__ == "__main__":
