@@ -31,6 +31,8 @@ REQUIRED_V02_RELEASE_FILES = {
     "g502x_onboard/tui/update.py",
     "g502x_onboard/tui/view.py",
     "docs/RELEASE_NOTES_V0.2.0.md",
+    "tools/extracted_release_smoke.py",
+    "tools/verify_release.py",
 }
 
 

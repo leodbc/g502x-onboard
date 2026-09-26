@@ -33,6 +33,8 @@ REQUIRED_V2_FILES = {
     "g502x_onboard/tui/bootstrap.py",
     "g502x_onboard/tui/runner.py",
     "docs/RELEASE_NOTES_V0.2.0.md",
+    "tools/extracted_release_smoke.py",
+    "tools/verify_release.py",
 }
 
 
