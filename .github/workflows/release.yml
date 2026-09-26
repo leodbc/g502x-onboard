@@ -28,8 +28,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libhidapi-hidraw0
 
-      - name: Install hash-locked dependencies
+      - name: Install core hash-locked dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Install locked optional TUI dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-tui.txt
 
       - name: Offline release gate
         run: |
@@ -45,6 +48,14 @@ jobs:
         run: |
           python tools/build_release.py --expected-tag "$GITHUB_REF_NAME"
           (cd dist && sha256sum -c "$RELEASE_NAME.zip.sha256")
+          python tools/verify_release.py "dist/$RELEASE_NAME"
+          python tools/verify_release.py "dist/$RELEASE_NAME.zip"
+
+      - name: Extracted core/no-Textual release smoke
+        run: python tools/extracted_release_smoke.py "dist/$RELEASE_NAME" --mode core --fresh-env
+
+      - name: Extracted locked-TUI release smoke
+        run: python tools/extracted_release_smoke.py "dist/$RELEASE_NAME" --mode tui --fresh-env
 
       - name: Verify release metadata before attestation
         run: |
@@ -59,8 +70,15 @@ jobs:
           sbom_path = root / "SBOM.spdx.json"
           sbom = json.loads(sbom_path.read_text())
 
+          assert manifest["format"] == "g502x-release-v2"
+          assert manifest["version"] == "0.2.0"
+          assert manifest["release_name"] == os.environ["RELEASE_NAME"]
           assert manifest["source_commit"] == os.environ["GITHUB_SHA"]
-          assert manifest["python_requirements"]["hash_checking"] is True
+          assert manifest["python_requirements"]["core"]["hash_checking"] is True
+          assert manifest["python_requirements"]["core"]["path"] == "requirements.txt"
+          assert manifest["python_requirements"]["optional_tui"]["hash_checking"] is True
+          assert manifest["python_requirements"]["optional_tui"]["path"] == "requirements-tui.txt"
+          assert "textual" in manifest["python_requirements"]["optional_tui"]["packages"]
           assert manifest["sbom"]["format"] == "SPDX-2.3"
           actual_sbom = hashlib.sha256(sbom_path.read_bytes()).hexdigest()
           assert manifest["sbom"]["sha256"] == actual_sbom
@@ -94,5 +112,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "G502 X Onboard $GITHUB_REF_NAME" \
-            --notes "First public release of G502 X Onboard. Persistent-write support is intentionally limited to the hardware/firmware scope documented in SUPPORTED_DEVICES.md; start with the read-only probe and setup workflow." \
-            --generate-notes
+            --notes-file "docs/RELEASE_NOTES_V0.2.0.md"
