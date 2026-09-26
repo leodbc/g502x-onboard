@@ -1539,5 +1539,24 @@ class TuiStateEngineTests(unittest.TestCase):
         self.assertEqual(effects, ())
 
 
+    def test_same_visible_operation_id_has_distinct_process_local_issuance(self):
+        old = OperationId("op-deadbeef")
+        current = OperationId("op-deadbeef")
+        self.assertEqual(str(old), str(current))
+        self.assertNotEqual(old, current)
+
+        model, _ = update(
+            TuiModel(),
+            OperationRequested(current, OperationAction.STATUS),
+        )
+        after, effects = update(
+            model,
+            ApplicationCompleted(old, "stale completion"),
+        )
+        self.assertEqual(after, model)
+        self.assertEqual(effects, ())
+        self.assertEqual(after.active.operation_id, current)
+
+
 if __name__ == "__main__":
     unittest.main()

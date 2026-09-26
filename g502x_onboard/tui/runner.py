@@ -50,9 +50,10 @@ class EffectRunner:
         self._facade = facade
         self._emit = emit
         self._lock = Lock()
-        self._dispatched: set[tuple[str, str]] = set()
-        self._tokens: dict[str, CancellationToken] = {}
-        self._pending_cancellation: set[str] = set()
+        self._dispatched: dict[int, set[str]] = {}
+        self._retired_issuance = 0
+        self._tokens: dict[int, CancellationToken] = {}
+        self._pending_cancellation: set[int] = set()
 
     def run(self, effect: Effect) -> bool:
         """Consume one exact effect once. Returns False for a duplicate dispatch."""
@@ -61,36 +62,57 @@ class EffectRunner:
         if isinstance(effect, RequestCooperativeCancellation):
             self._request_cancellation(effect.operation_id)
             return True
+
+        retire_after = not isinstance(effect, PreparePersistentOperation)
         try:
             if isinstance(effect, RequestExplicitRefresh):
                 self._run_refresh(effect)
             elif isinstance(effect, StartForegroundOperation):
                 self._run_foreground(effect)
             elif isinstance(effect, PreparePersistentOperation):
-                self._run_prepare(effect)
+                retire_after = not self._run_prepare(effect)
             elif isinstance(effect, ExecutePreparedOperation):
                 self._run_execute(effect)
             else:
                 raise TypeError(f"unsupported effect: {type(effect).__name__}")
         except Exception:
+            retire_after = True
             self._emit(
                 WorkerTransportFault(
                     effect.operation_id,
                     self._adapter_fault(),
                 )
             )
+        finally:
+            if retire_after:
+                self.retire_operation(effect.operation_id)
         return True
 
     def _claim_effect(self, effect: Effect) -> bool:
-        key = (type(effect).__name__, str(effect.operation_id))
+        issuance = effect.operation_id.issuance
+        effect_type = type(effect).__name__
         with self._lock:
-            if key in self._dispatched:
+            if issuance <= self._retired_issuance:
                 return False
-            self._dispatched.add(key)
+            claimed = self._dispatched.setdefault(issuance, set())
+            if effect_type in claimed:
+                return False
+            claimed.add(effect_type)
             return True
 
+    def retire_operation(self, operation_id: OperationId) -> None:
+        """Release all adapter authority retained for one completed/abandoned issuance."""
+        issuance = operation_id.issuance
+        with self._lock:
+            self._retired_issuance = max(self._retired_issuance, issuance)
+            for claimed_issuance in tuple(self._dispatched):
+                if claimed_issuance <= self._retired_issuance:
+                    self._dispatched.pop(claimed_issuance, None)
+            self._tokens.pop(issuance, None)
+            self._pending_cancellation.discard(issuance)
+
     def _request_cancellation(self, operation_id: OperationId) -> None:
-        key = str(operation_id)
+        key = operation_id.issuance
         with self._lock:
             token = self._tokens.get(key)
             if token is None:
@@ -194,7 +216,7 @@ class EffectRunner:
             )
         )
 
-    def _run_prepare(self, effect: PreparePersistentOperation) -> None:
+    def _run_prepare(self, effect: PreparePersistentOperation) -> bool:
         from g502x_onboard.application import PersistentOperationKind
 
         self._emit(OperationStarted(effect.operation_id))
@@ -210,7 +232,7 @@ class EffectRunner:
                         ),
                     )
                 )
-                return
+                return False
             result = self._facade.prepare_apply(effect.config_path)
         elif effect.kind is PersistentOperationKind.RESTORE_BACKUP:
             if not effect.backup_path:
@@ -224,7 +246,7 @@ class EffectRunner:
                         ),
                     )
                 )
-                return
+                return False
             result = self._facade.prepare_restore_backup(effect.backup_path)
         elif effect.kind is PersistentOperationKind.RESTORE_BASELINE:
             result = self._facade.prepare_restore_baseline()
@@ -239,15 +261,16 @@ class EffectRunner:
                     ),
                 )
             )
-            return
+            return False
 
         if result.ok:
             self._emit(PreparedReceived(effect.operation_id, result.value))
-        else:
-            self._emit(ApplicationFailed(effect.operation_id, result.error))
+            return True
+        self._emit(ApplicationFailed(effect.operation_id, result.error))
+        return False
 
     def _run_execute(self, effect: ExecutePreparedOperation) -> None:
-        key = str(effect.operation_id)
+        key = effect.operation_id.issuance
         token = CancellationToken()
         with self._lock:
             self._tokens[key] = token

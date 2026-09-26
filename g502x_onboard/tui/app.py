@@ -413,6 +413,7 @@ class G502XTuiApp(App[None]):
         self.call_from_thread(self._accept_event, event)
 
     def _accept_event(self, event: object) -> None:
+        previous_active = self._model.active
         self._model, effects = update(self._model, event)
         active = self._model.active
         if (
@@ -433,6 +434,12 @@ class G502XTuiApp(App[None]):
                 self._model,
                 Navigate(Route.HOME),
             )
+        current_active = self._model.active
+        if previous_active is not None and (
+            current_active is None
+            or current_active.operation_id != previous_active.operation_id
+        ):
+            self._runner.retire_operation(previous_active.operation_id)
         self._render()
         for effect in effects:
             self._dispatch_effect(effect)

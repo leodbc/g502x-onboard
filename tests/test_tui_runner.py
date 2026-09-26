@@ -223,5 +223,68 @@ class EffectRunnerTests(unittest.TestCase):
                 self.assertFalse(any(isinstance(e, PersistentCompleted) for e in emitted))
 
 
+    def test_long_run_terminal_effect_history_is_reclaimed(self):
+        emitted = []
+        facade = RefreshFacade()
+        runner = EffectRunner(facade, emitted.append)
+
+        for index in range(1000):
+            effect = RequestExplicitRefresh(
+                OperationId(f"op-{index:08x}")
+            )
+            self.assertTrue(runner.run(effect))
+
+        self.assertEqual(len(facade.calls), 1000)
+        self.assertEqual(runner._dispatched, {})
+        self.assertEqual(runner._tokens, {})
+        self.assertEqual(runner._pending_cancellation, set())
+
+    def test_delayed_persistent_duplicate_is_rejected_after_terminal_retirement(self):
+        emitted = []
+        facade = PersistentFacade(
+            phases=(PersistentPhase.REVALIDATING,),
+            success=False,
+        )
+        runner = EffectRunner(facade, emitted.append)
+        op = OperationId("op-deadbeef")
+        effect = ExecutePreparedOperation(
+            op, make_prepared(), "APPLY CONFIG"
+        )
+
+        self.assertTrue(runner.run(effect))
+        self.assertFalse(runner.run(effect))
+        self.assertEqual(facade.calls, 1)
+        self.assertEqual(runner._dispatched, {})
+        self.assertEqual(runner._tokens, {})
+
+    def test_retirement_clears_pending_cancel_and_same_visible_id_cannot_misroute(self):
+        emitted = []
+        facade = PersistentFacade(
+            phases=(PersistentPhase.REVALIDATING,),
+            success=False,
+        )
+        runner = EffectRunner(facade, emitted.append)
+        old = OperationId("op-deadbeef")
+
+        self.assertTrue(runner.run(RequestCooperativeCancellation(old)))
+        self.assertIn(old.issuance, runner._pending_cancellation)
+        runner.retire_operation(old)
+        self.assertEqual(runner._pending_cancellation, set())
+
+        new = OperationId("op-deadbeef")
+        self.assertNotEqual(old, new)
+        self.assertTrue(
+            runner.run(
+                ExecutePreparedOperation(
+                    new, make_prepared(), "APPLY CONFIG"
+                )
+            )
+        )
+        self.assertEqual(facade.calls, 1)
+        self.assertFalse(facade.tokens[0].is_cancelled)
+        self.assertEqual(runner._tokens, {})
+        self.assertEqual(runner._pending_cancellation, set())
+
+
 if __name__ == "__main__":
     unittest.main()

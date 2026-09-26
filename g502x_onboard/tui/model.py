@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from itertools import count
 import re
+from threading import Lock
 
 from g502x_onboard.application.models import (
     ApplicationError,
@@ -14,6 +16,14 @@ from g502x_onboard.application.models import (
 )
 
 _OPERATION_ID_RE = re.compile(r"op-[0-9a-f]{8,64}\Z")
+
+_OPERATION_ISSUANCE_COUNTER = count(1)
+_OPERATION_ISSUANCE_LOCK = Lock()
+
+
+def _next_operation_issuance() -> int:
+    with _OPERATION_ISSUANCE_LOCK:
+        return next(_OPERATION_ISSUANCE_COUNTER)
 
 
 class Route(str, Enum):
@@ -50,6 +60,11 @@ class TerminalOutcome(str, Enum):
 @dataclass(frozen=True)
 class OperationId:
     value: str
+    issuance: int = field(
+        default_factory=_next_operation_issuance,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if not _OPERATION_ID_RE.fullmatch(self.value):
