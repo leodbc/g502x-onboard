@@ -16,6 +16,15 @@ python -m unittest discover -s tests -p "test_*.py" -v
 python g502x.py selftest
 python g502x.py --help
 python g502x.py capabilities --json
+python g502x_tui.py --help
+```
+
+For changes that affect the optional TUI or release surface, also install the
+committed optional lock and run the TUI suite:
+
+```bash
+python -m pip install -r requirements-tui.txt
+python -m unittest discover -s tests -p "test_tui*.py" -v
 ```
 
 Protocol-affecting changes should include:
