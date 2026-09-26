@@ -35,7 +35,9 @@ class OperationAction(str, Enum):
     PROBE = "probe"
     STATUS = "status"
     VALIDATE = "validate"
+    PLAN = "plan"
     PROFILE_SWITCH = "profile-switch"
+    REPORT = "report"
     PREPARE_PERSISTENT = "prepare-persistent"
     REFRESH = "refresh"
 
@@ -76,6 +78,7 @@ class ForegroundOperation:
     cancellation_deferred: bool = False
     application_cancellation_allowed: bool | None = None
     execution_requested: bool = False
+    worker_fault_unresolved: bool = False
 
     @property
     def non_cancellable(self) -> bool:
@@ -118,6 +121,10 @@ class TuiModel:
     prepared: PreparedOperation | None = None
     review_acknowledged: bool = False
     confirmation_input: str = ""
+    config_path_input: str = ""
+    backup_path_input: str = ""
+    profile_target_input: str = "1"
+    profile_confirmation_input: str = ""
     last_result: PresentationPayload | None = None
     last_error: ApplicationError | None = None
     terminal: TerminalState | None = None
