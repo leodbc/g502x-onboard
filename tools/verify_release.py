@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -10,7 +11,11 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from release_metadata import parse_requirements_lock
+from release_metadata import (
+    canonicalize_package_name,
+    parse_requirements_lock,
+    spdx_pypi_id,
+)
 
 
 SUPPORTED_FORMATS = {"g502x-release-v1", "g502x-release-v2"}
@@ -23,12 +28,20 @@ MAX_ENTRY_BYTES = 16 * 1024 * 1024
 MAX_MEMBERS = 2048
 CANONICAL_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 CANONICAL_FILE_MODE = 0o100644
+HISTORICAL_V1_VERSION = "0.1.0"
+HISTORICAL_V1_SOURCE_COMMIT = "bf3d4458176b0c8326888158d08d3332c1429737"
+HISTORICAL_V1_RELEASE_NAME = "g502x-onboard-0.1.0"
+HISTORICAL_V1_ENTRYPOINT = "g502x.py"
+HISTORICAL_V1_PACKAGES = {"hid": "1.0.9"}
 REQUIRED_V2_FILES = {
     "g502x.py",
     "g502x_tui.py",
     "requirements.txt",
     "requirements-tui.txt",
     "g502x_onboard/__init__.py",
+    "libs/utils.py",
+    "libs/x64/hidapi.dll",
+    "libs/x86/hidapi.dll",
     "g502x_onboard/tui/app.py",
     "g502x_onboard/tui/bootstrap.py",
     "g502x_onboard/tui/runner.py",
@@ -72,6 +85,83 @@ def _load_json_bytes(data: bytes, *, context: str) -> dict:
     if not isinstance(value, dict):
         raise RuntimeError(f"{context}: JSON root must be an object")
     return value
+
+
+
+def _verify_historical_v1_contract(
+    manifest: dict,
+) -> tuple[dict[str, str], dict[str, str], str]:
+    if manifest.get("version") != HISTORICAL_V1_VERSION:
+        raise RuntimeError("historical v1 manifest version mismatch")
+    if manifest.get("source_commit") != HISTORICAL_V1_SOURCE_COMMIT:
+        raise RuntimeError("historical v1 manifest source_commit mismatch")
+    if manifest.get("entrypoint") != HISTORICAL_V1_ENTRYPOINT:
+        raise RuntimeError("historical v1 manifest entrypoint mismatch")
+
+    requirements = manifest.get("python_requirements")
+    if (
+        not isinstance(requirements, dict)
+        or requirements.get("hash_checking") is not True
+        or requirements.get("packages") != HISTORICAL_V1_PACKAGES
+    ):
+        raise RuntimeError(
+            "historical v1 manifest dependency contract mismatch"
+        )
+    return dict(HISTORICAL_V1_PACKAGES), {}, HISTORICAL_V1_VERSION
+
+
+def _verify_historical_v1_sbom(sbom_json: dict) -> None:
+    if sbom_json.get("name") != HISTORICAL_V1_RELEASE_NAME:
+        raise RuntimeError("historical v1 SBOM release name mismatch")
+    packages = sbom_json.get("packages")
+    if not isinstance(packages, list):
+        raise RuntimeError("historical v1 SBOM packages table missing")
+    roots = [
+        row for row in packages
+        if isinstance(row, dict)
+        and row.get("SPDXID") == "SPDXRef-Package-g502x-onboard"
+    ]
+    if len(roots) != 1 or roots[0].get("versionInfo") != HISTORICAL_V1_VERSION:
+        raise RuntimeError("historical v1 SBOM root package mismatch")
+
+
+def _runtime_hidapi_hashes(
+    read_bytes: Callable[[str], bytes],
+) -> dict[str, str]:
+    try:
+        source = read_bytes("libs/utils.py").decode("utf-8")
+        tree = ast.parse(source, filename="libs/utils.py")
+    except Exception as exc:
+        raise RuntimeError("unable to inspect runtime hidapi hash authority") from exc
+
+    value = None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name)
+            and target.id == "WINDOWS_HIDAPI_SHA256"
+            for target in node.targets
+        ):
+            try:
+                value = ast.literal_eval(node.value)
+            except Exception as exc:
+                raise RuntimeError(
+                    "runtime hidapi hash authority is not a literal mapping"
+                ) from exc
+            break
+
+    if not isinstance(value, dict) or set(value) != {"x64", "x86"}:
+        raise RuntimeError("runtime hidapi hash authority is incomplete")
+
+    out: dict[str, str] = {}
+    for arch, digest in value.items():
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise RuntimeError(
+                f"runtime hidapi hash authority invalid for {arch}"
+            )
+        out[arch] = digest.lower()
+    return out
 
 
 def _verify_v2_requirements(
@@ -152,58 +242,145 @@ def _verify_spdx_dependencies(
     version: str,
     core_packages: dict[str, str],
     optional_packages: dict[str, str],
+    read_bytes: Callable[[str], bytes],
 ) -> None:
     packages = sbom_json.get("packages")
+    files = sbom_json.get("files")
+    relationships = sbom_json.get("relationships")
     if not isinstance(packages, list):
         raise RuntimeError("SBOM packages table missing")
-    package_rows = {
-        row.get("SPDXID"): row
-        for row in packages
-        if isinstance(row, dict) and isinstance(row.get("SPDXID"), str)
-    }
-    root = package_rows.get("SPDXRef-Package-g502x-onboard")
-    if not isinstance(root, dict) or root.get("versionInfo") != version:
-        raise RuntimeError("SBOM root package version mismatch")
-
-    relationships = sbom_json.get("relationships")
+    if not isinstance(files, list):
+        raise RuntimeError("SBOM files table missing")
     if not isinstance(relationships, list):
         raise RuntimeError("SBOM relationships table missing")
-    relationship_set = {
-        (
-            row.get("spdxElementId"),
-            row.get("relationshipType"),
-            row.get("relatedSpdxElement"),
-        )
-        for row in relationships
-        if isinstance(row, dict)
-    }
+
+    document_id = sbom_json.get("SPDXID")
+    if not isinstance(document_id, str):
+        raise RuntimeError("SBOM document SPDXID missing")
+
+    package_rows: dict[str, dict] = {}
+    canonical_package_names: dict[str, str] = {}
+    for row in packages:
+        if not isinstance(row, dict) or not isinstance(row.get("SPDXID"), str):
+            raise RuntimeError("SBOM package has invalid SPDXID")
+        spdx_id = row["SPDXID"]
+        if spdx_id in package_rows:
+            raise RuntimeError(f"SBOM duplicate SPDXID: {spdx_id}")
+        name = row.get("name")
+        if not isinstance(name, str):
+            raise RuntimeError(f"SBOM package name missing: {spdx_id}")
+        try:
+            canonical = canonicalize_package_name(name)
+        except ValueError as exc:
+            raise RuntimeError(f"SBOM package name invalid: {name!r}") from exc
+        previous = canonical_package_names.get(canonical)
+        if previous is not None:
+            raise RuntimeError(
+                "SBOM canonical package-name collision: "
+                f"{canonical!r} ({previous}, {spdx_id})"
+            )
+        canonical_package_names[canonical] = spdx_id
+        package_rows[spdx_id] = row
+
+    file_rows: dict[str, dict] = {}
+    for row in files:
+        if not isinstance(row, dict) or not isinstance(row.get("SPDXID"), str):
+            raise RuntimeError("SBOM file has invalid SPDXID")
+        spdx_id = row["SPDXID"]
+        if spdx_id in file_rows or spdx_id in package_rows or spdx_id == document_id:
+            raise RuntimeError(f"SBOM duplicate/colliding SPDXID: {spdx_id}")
+        file_rows[spdx_id] = row
+    if document_id in package_rows or document_id in file_rows:
+        raise RuntimeError(f"SBOM duplicate/colliding SPDXID: {document_id}")
+
+    all_ids = {document_id, *package_rows, *file_rows}
+    relationship_set: set[tuple[str, str, str]] = set()
+    for row in relationships:
+        if not isinstance(row, dict):
+            raise RuntimeError("SBOM relationship row invalid")
+        left = row.get("spdxElementId")
+        relation = row.get("relationshipType")
+        right = row.get("relatedSpdxElement")
+        if not all(isinstance(value, str) for value in (left, relation, right)):
+            raise RuntimeError("SBOM relationship fields invalid")
+        if left not in all_ids or right not in all_ids:
+            raise RuntimeError("SBOM relationship references unknown SPDXID")
+        relationship_set.add((left, relation, right))
+
+    root_id = "SPDXRef-Package-g502x-onboard"
+    root = package_rows.get(root_id)
+    if (
+        not isinstance(root, dict)
+        or root.get("name") != "g502x-onboard"
+        or root.get("versionInfo") != version
+    ):
+        raise RuntimeError("SBOM root package/version mismatch")
 
     for name, dep_version in core_packages.items():
-        dep_id = "SPDXRef-Package-pypi-" + name.replace("_", "-")
+        dep_id = spdx_pypi_id(name)
         row = package_rows.get(dep_id)
-        if not isinstance(row, dict) or row.get("versionInfo") != dep_version:
-            raise RuntimeError(f"SBOM core dependency mismatch: {name}")
         if (
-            "SPDXRef-Package-g502x-onboard",
-            "DEPENDS_ON",
-            dep_id,
-        ) not in relationship_set:
+            not isinstance(row, dict)
+            or canonicalize_package_name(row.get("name", "")) != name
+            or row.get("versionInfo") != dep_version
+        ):
+            raise RuntimeError(f"SBOM core dependency mismatch: {name}")
+        if (root_id, "DEPENDS_ON", dep_id) not in relationship_set:
             raise RuntimeError(f"SBOM core dependency relationship missing: {name}")
 
     for name, dep_version in optional_packages.items():
-        dep_id = "SPDXRef-Package-pypi-" + name.replace("_", "-")
+        dep_id = spdx_pypi_id(name)
         row = package_rows.get(dep_id)
-        if not isinstance(row, dict) or row.get("versionInfo") != dep_version:
-            raise RuntimeError(f"SBOM optional TUI dependency mismatch: {name}")
         if (
-            dep_id,
-            "OPTIONAL_DEPENDENCY_OF",
-            "SPDXRef-Package-g502x-onboard",
-        ) not in relationship_set:
+            not isinstance(row, dict)
+            or canonicalize_package_name(row.get("name", "")) != name
+            or row.get("versionInfo") != dep_version
+        ):
+            raise RuntimeError(f"SBOM optional TUI dependency mismatch: {name}")
+        if (dep_id, "OPTIONAL_DEPENDENCY_OF", root_id) not in relationship_set:
             raise RuntimeError(
                 f"SBOM optional TUI dependency relationship missing: {name}"
             )
 
+    hidapi_id = "SPDXRef-Package-vendored-hidapi"
+    hidapi = package_rows.get(hidapi_id)
+    if (
+        not isinstance(hidapi, dict)
+        or hidapi.get("name") != "hidapi"
+        or hidapi.get("versionInfo") != "0.15.0"
+    ):
+        raise RuntimeError("SBOM vendored hidapi package/version mismatch")
+    if (root_id, "DEPENDS_ON", hidapi_id) not in relationship_set:
+        raise RuntimeError("SBOM vendored hidapi dependency relationship missing")
+
+    runtime_hashes = _runtime_hidapi_hashes(read_bytes)
+    for arch in ("x64", "x86"):
+        rel = f"libs/{arch}/hidapi.dll"
+        actual_hash = sha256_bytes(read_bytes(rel)).lower()
+        if actual_hash != runtime_hashes[arch]:
+            raise RuntimeError(
+                f"vendored hidapi {arch} bytes disagree with runtime hash authority"
+            )
+
+        file_id = f"SPDXRef-File-hidapi-{arch}"
+        row = file_rows.get(file_id)
+        if not isinstance(row, dict) or row.get("fileName") != f"./{rel}":
+            raise RuntimeError(f"SBOM vendored hidapi file record mismatch: {arch}")
+        checksums = row.get("checksums")
+        if not isinstance(checksums, list):
+            raise RuntimeError(f"SBOM vendored hidapi checksum missing: {arch}")
+        sha256_values = {
+            item.get("checksumValue", "").lower()
+            for item in checksums
+            if isinstance(item, dict) and item.get("algorithm") == "SHA256"
+            and isinstance(item.get("checksumValue"), str)
+        }
+        if sha256_values != {actual_hash}:
+            raise RuntimeError(f"SBOM vendored hidapi SHA-256 mismatch: {arch}")
+        if (hidapi_id, "CONTAINS", file_id) not in relationship_set:
+            raise RuntimeError(
+                f"SBOM vendored hidapi containment relationship missing: {arch}"
+            )
 
 def _verify_payload(
     *,
@@ -276,17 +453,9 @@ def _verify_payload(
             )
 
     if fmt == "g502x-release-v1":
-        requirements = manifest.get("python_requirements")
-        if (
-            not isinstance(requirements, dict)
-            or requirements.get("hash_checking") is not True
-        ):
-            raise RuntimeError(
-                "historical release manifest does not assert hash-checked dependencies"
-            )
-        core_packages = requirements.get("packages") or {}
-        optional_packages: dict[str, str] = {}
-        version = manifest.get("version")
+        core_packages, optional_packages, version = _verify_historical_v1_contract(
+            manifest
+        )
     else:
         core_packages, optional_packages = _verify_v2_contract(
             manifest=manifest,
@@ -315,12 +484,15 @@ def _verify_payload(
     if not isinstance(namespace, str) or not namespace.endswith(source_commit):
         raise RuntimeError("SBOM namespace is not bound to source_commit")
 
-    if fmt == "g502x-release-v2":
+    if fmt == "g502x-release-v1":
+        _verify_historical_v1_sbom(sbom_json)
+    else:
         _verify_spdx_dependencies(
             sbom_json=sbom_json,
             version=version,
             core_packages=core_packages,
             optional_packages=optional_packages,
+            read_bytes=read_bytes,
         )
 
 
@@ -441,6 +613,10 @@ def verify_archive(archive: str | Path) -> None:
             raise RuntimeError("ZIP contains duplicate member names")
 
         safe = [_safe_archive_name(name) for name in names]
+        canonical_names = sorted(path.as_posix() for path in safe)
+        if names != canonical_names:
+            raise RuntimeError("ZIP member order is not canonical lexicographic order")
+
         roots = {path.parts[0] for path in safe}
         if len(roots) != 1:
             raise RuntimeError(f"ZIP contains multiple release roots: {sorted(roots)}")
@@ -472,6 +648,14 @@ def verify_archive(archive: str | Path) -> None:
             zf.read(manifest_info),
             context="release manifest",
         )
+        fmt = manifest.get("format")
+        if fmt == "g502x-release-v2":
+            release_name = manifest.get("release_name")
+            if not isinstance(release_name, str) or root_name != release_name:
+                raise RuntimeError("v2 ZIP root does not match release_name")
+        elif fmt == "g502x-release-v1":
+            if root_name != HISTORICAL_V1_RELEASE_NAME:
+                raise RuntimeError("historical v1 ZIP root mismatch")
 
         _verify_payload(
             manifest=manifest,

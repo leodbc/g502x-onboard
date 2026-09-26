@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -23,59 +24,80 @@ def normalize_git_timestamp(value: str) -> str:
     )
 
 
+PACKAGE_NAME_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+)
+PACKAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]*$")
+SHA256_TOKEN_RE = re.compile(r"^--hash=sha256:([0-9a-fA-F]{64})$")
+
+
+def canonicalize_package_name(name: str) -> str:
+    """Return the PyPA canonical project identity used by release metadata."""
+    if not isinstance(name, str) or not PACKAGE_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid dependency name: {name!r}")
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def spdx_pypi_id(name: str) -> str:
+    return "SPDXRef-Package-pypi-" + canonicalize_package_name(name)
+
+
 def parse_requirements_lock(text: str) -> dict[str, str]:
-    logical = text.replace("\\\n", " ")
+    """Parse the deliberately narrow hash-locked release requirements grammar."""
+    logical = text.replace("\\\r\n", " ").replace("\\\n", " ")
     lines = [
         line.strip()
         for line in logical.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    if "--require-hashes" not in lines:
-        raise ValueError("requirements lock must enable --require-hashes")
+
+    require_hashes_count = sum(line == "--require-hashes" for line in lines)
+    if require_hashes_count != 1:
+        raise ValueError(
+            "requirements lock must contain exactly one --require-hashes"
+        )
 
     packages: dict[str, str] = {}
     for line in lines:
-        if line.startswith("--"):
+        if line == "--require-hashes":
             continue
+        if line.startswith("--") or line.startswith("-"):
+            raise ValueError(f"unsupported requirements option: {line}")
+
         parts = line.split()
+        if not parts:
+            continue
         pin = parts[0]
         if pin.count("==") != 1:
             raise ValueError(f"requirement is not exactly pinned: {line}")
         name, version = pin.split("==", 1)
-        if not name or not version:
-            raise ValueError(f"empty dependency name/version: {line}")
+        key = canonicalize_package_name(name)
+        if not version or not PACKAGE_VERSION_RE.fullmatch(version):
+            raise ValueError(f"invalid exact dependency version: {line}")
 
-        hash_tokens = [
-            token for token in parts[1:] if token.startswith("--hash=")
-        ]
-        unsupported = [
-            token for token in hash_tokens
-            if not token.startswith("--hash=sha256:")
-        ]
-        if unsupported:
-            raise ValueError(
-                f"requirement pin uses unsupported hash algorithm: {line}"
-            )
+        hashes: list[str] = []
+        for token in parts[1:]:
+            if token.startswith("--hash=") and not token.startswith("--hash=sha256:"):
+                raise ValueError(
+                    f"requirement pin uses unsupported hash algorithm: {line}"
+                )
+            match = SHA256_TOKEN_RE.fullmatch(token)
+            if match is None:
+                raise ValueError(
+                    f"requirement pin has unsupported trailing syntax: {line}"
+                )
+            hashes.append(match.group(1))
 
-        hashes = [
-            token.removeprefix("--hash=sha256:")
-            for token in hash_tokens
-        ]
         if not hashes:
             raise ValueError(
                 f"requirement pin is missing a sha256 hash: {line}"
             )
-        for digest in hashes:
-            if (
-                len(digest) != 64
-                or any(ch not in "0123456789abcdefABCDEF" for ch in digest)
-            ):
-                raise ValueError(
-                    f"requirement pin has an invalid sha256 hash: {line}"
-                )
-        key = name.lower()
+
         if key in packages:
-            raise ValueError(f"duplicate requirement pin: {name}")
+            raise ValueError(
+                f"canonical package name collision/duplicate requirement: "
+                f"{name!r} -> {key!r}"
+            )
         packages[key] = version
 
     if not packages:
@@ -100,7 +122,7 @@ def _spdx_dependency(
         {"license": "NOASSERTION", "download": "NOASSERTION"},
     )
     package = {
-        "SPDXID": "SPDXRef-Package-pypi-" + name.replace("_", "-"),
+        "SPDXID": spdx_pypi_id(name),
         "name": name,
         "versionInfo": version,
         "downloadLocation": meta["download"],
