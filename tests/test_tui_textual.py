@@ -22,6 +22,7 @@ from g502x_onboard.application.models import (
 )
 
 try:
+    from textual import events as textual_events
     from textual.widgets import Button, Input, Static
     from g502x_onboard.tui.app import G502XTuiApp
     TEXTUAL_AVAILABLE = True
@@ -167,7 +168,7 @@ class HarnessFacade:
         return OperationResult(ok=True, value=value, privacy=value.privacy)
 
 
-async def wait_until(pilot, predicate, message: str, limit: int = 150) -> None:
+async def wait_until(pilot, predicate, message: str, limit: int = 60) -> None:
     for _ in range(limit):
         if predicate():
             return
@@ -263,6 +264,21 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("NO_COLOR: semantic labels active", summary)
                 self.assertIn("READ ONLY", summary)
 
+
+    async def test_focused_text_input_consumes_letter_shortcuts_without_dispatch(self):
+        facade = HarnessFacade()
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await focus_id(pilot, app, "config-path")
+            await pilot.press("a", "p", "p", "l", "y", "g", "r", "v", "n", "s", "b", "d", "h")
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.config_path_input == "applygrvnsbdh",
+                "focused Input did not consume printable shortcut letters",
+            )
+            self.assertEqual(facade.calls, [])
+            self.assertIsNone(app.tui_model.active)
+
     async def _keyboard_prepare_to_confirmation(self, app, pilot):
         await focus_id(pilot, app, "config-path")
         await pilot.press("x", ".", "j", "s", "o", "n")
@@ -292,9 +308,10 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await focus_id(pilot, app, "persistent-confirm")
-        await pilot.press(
-            "A", "P", "P", "L", "Y", "space", "C", "O", "N", "F", "I", "G"
-        )
+        confirmation = app.query_one("#persistent-confirm", Input)
+        for character in "APPLY CONFIG":
+            key = "space" if character == " " else character
+            confirmation.post_message(textual_events.Key(key, character))
         await wait_until(
             pilot,
             lambda: app.tui_model.confirmation_input == "APPLY CONFIG",
