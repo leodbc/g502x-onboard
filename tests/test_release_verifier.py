@@ -95,7 +95,7 @@ def _fixture(root: Path) -> None:
 
 def _canonical_zip(root: Path, archive: Path) -> None:
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
-        for path in sorted(root.iterdir()):
+        for path in sorted(root.iterdir(), key=lambda path: path.name):
             info = zipfile.ZipInfo(
                 filename=f"{HISTORICAL_V1_RELEASE_NAME}/{path.name}",
                 date_time=(1980, 1, 1, 0, 0, 0),
