@@ -306,6 +306,8 @@ class G502XTuiApp(App[None]):
         self._request_operation(OperationAction.PROBE)
 
     def action_refresh(self) -> None:
+        if self._layout_constrained():
+            return
         self._accept_event(RefreshRequested(self._operation_id_factory()))
 
     def action_validate(self) -> None:
@@ -400,6 +402,8 @@ class G502XTuiApp(App[None]):
         hardware_affecting: bool = True,
         persistent_kind: PersistentOperationKind | None = None,
     ) -> None:
+        if self._layout_constrained():
+            return
         self._accept_event(
             OperationRequested(
                 self._operation_id_factory(),
@@ -455,12 +459,17 @@ class G502XTuiApp(App[None]):
             thread=True,
         )
 
+    def _layout_constrained(self) -> bool:
+        if not self.is_mounted:
+            return False
+        width = self.size.width
+        height = self.size.height
+        return width < self.MINIMUM_SIZE[0] or height < self.MINIMUM_SIZE[1]
+
     def _render(self) -> None:
         if not self.is_mounted:
             return
-        width = self.size.width
-        height = self.size.height
-        constrained = width < self.MINIMUM_SIZE[0] or height < self.MINIMUM_SIZE[1]
+        constrained = self._layout_constrained()
         try:
             constrained_widget = self.query_one("#constrained", Static)
             main_widget = self.query_one("#main", Vertical)

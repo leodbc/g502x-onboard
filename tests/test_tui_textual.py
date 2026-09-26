@@ -234,6 +234,12 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app.query_one("#main").display)
             self.assertEqual(facade.calls, [])
 
+            app.set_focus(None)
+            await pilot.press("p", "r", "v", "n", "a", "b", "l", "s", "g")
+            await pilot.pause()
+            self.assertEqual(facade.calls, [])
+            self.assertIsNone(app.tui_model.active)
+
     async def test_idle_navigation_help_focus_resize_do_not_poll_then_refresh_once(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
