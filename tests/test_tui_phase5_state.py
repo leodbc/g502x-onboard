@@ -261,6 +261,59 @@ class Phase5StateTests(unittest.TestCase):
         self.assertIsNone(model.active)
         self.assertEqual(view(model).terminal_label, "SUCCESS")
 
+    def test_terminal_persistent_completion_clears_stale_path_inputs(self):
+        op = OperationId("op-66666666")
+        model, _ = update(TuiModel(), ConfigPathChanged("/private/config.json"))
+        model, _ = update(
+            model,
+            OperationRequested(
+                op,
+                OperationAction.PREPARE_PERSISTENT,
+                persistent_kind=PersistentOperationKind.APPLY_CONFIG,
+            ),
+        )
+        model, _ = update(model, PreparedReceived(op, prepared()))
+        model, _ = update(model, EnterReview(op))
+        model, _ = update(model, ReviewAcknowledged(op, True))
+        model, _ = update(model, ConfirmationChanged(op, "APPLY CONFIG"))
+        model, _ = update(model, ConfirmationSubmitted(op))
+        for phase in (
+            PersistentPhase.REVALIDATING,
+            PersistentPhase.ARMED,
+            PersistentPhase.WRITING,
+            PersistentPhase.RECONCILING,
+            PersistentPhase.POST_VALIDATING,
+        ):
+            model, _ = update(
+                model,
+                PersistentProgress(
+                    op,
+                    PersistentPhaseSnapshot(
+                        phase=phase,
+                        kind=PersistentOperationKind.APPLY_CONFIG,
+                        cancellation_allowed=phase in {
+                            PersistentPhase.REVALIDATING,
+                            PersistentPhase.ARMED,
+                        },
+                    ),
+                ),
+            )
+        result = PersistentExecutionResult(
+            operation_kind=PersistentOperationKind.APPLY_CONFIG,
+            terminal_phase=PersistentPhase.SUCCEEDED,
+            success=True,
+            pre_write_status="ok",
+            writing_started=True,
+            reconciliation_completed=True,
+            post_validation_completed=True,
+            message="done",
+        )
+        model, _ = update(model, PersistentCompleted(op, result))
+        self.assertEqual(model.config_path_input, "")
+        self.assertEqual(model.backup_path_input, "")
+        self.assertEqual(model.confirmation_input, "")
+        self.assertIsNone(model.prepared)
+
     def test_shareable_downgrade_clears_sensitive_paths_and_prepared_state(self):
         op = OperationId("op-55555555")
         model, _ = update(TuiModel(), ConfigPathChanged("/private/config.json"))
