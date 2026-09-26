@@ -10,16 +10,30 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
+from release_metadata import parse_requirements_lock
 
-SUPPORTED_FORMATS = {"g502x-release-v1"}
+
+SUPPORTED_FORMATS = {"g502x-release-v1", "g502x-release-v2"}
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+VERSION_RE = re.compile(r'^__version__\s*=\s*"([^"]+)"', re.MULTILINE)
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 MAX_ENTRY_BYTES = 16 * 1024 * 1024
 MAX_MEMBERS = 2048
 CANONICAL_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 CANONICAL_FILE_MODE = 0o100644
+REQUIRED_V2_FILES = {
+    "g502x.py",
+    "g502x_tui.py",
+    "requirements.txt",
+    "requirements-tui.txt",
+    "g502x_onboard/__init__.py",
+    "g502x_onboard/tui/app.py",
+    "g502x_onboard/tui/bootstrap.py",
+    "g502x_onboard/tui/runner.py",
+    "docs/RELEASE_NOTES_V0.2.0.md",
+}
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -58,6 +72,137 @@ def _load_json_bytes(data: bytes, *, context: str) -> dict:
     return value
 
 
+def _verify_v2_requirements(
+    requirements: object,
+    *,
+    expected_files: set[str],
+    read_bytes: Callable[[str], bytes],
+) -> tuple[dict[str, str], dict[str, str]]:
+    if not isinstance(requirements, dict):
+        raise RuntimeError("release manifest python_requirements missing")
+    parsed: dict[str, dict[str, str]] = {}
+    for scope, expected_path in (
+        ("core", "requirements.txt"),
+        ("optional_tui", "requirements-tui.txt"),
+    ):
+        row = requirements.get(scope)
+        if not isinstance(row, dict):
+            raise RuntimeError(f"release manifest {scope} requirements missing")
+        if row.get("hash_checking") is not True:
+            raise RuntimeError(f"release manifest {scope} lock is not hash checked")
+        path = row.get("path")
+        if path != expected_path or path not in expected_files:
+            raise RuntimeError(f"release manifest {scope} lock path mismatch")
+        expected_hash = row.get("sha256")
+        if not isinstance(expected_hash, str) or not SHA256_RE.fullmatch(expected_hash):
+            raise RuntimeError(f"release manifest {scope} lock sha256 invalid")
+        data = read_bytes(path)
+        if sha256_bytes(data).lower() != expected_hash.lower():
+            raise RuntimeError(f"release manifest {scope} lock digest mismatch")
+        try:
+            lock_packages = parse_requirements_lock(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise RuntimeError(f"release manifest {scope} lock invalid") from exc
+        declared = row.get("packages")
+        if declared != lock_packages:
+            raise RuntimeError(f"release manifest {scope} package set mismatch")
+        parsed[scope] = lock_packages
+
+    overlap = set(parsed["core"]) & set(parsed["optional_tui"])
+    if overlap:
+        raise RuntimeError("core and optional dependency scopes overlap")
+    return parsed["core"], parsed["optional_tui"]
+
+
+def _verify_v2_contract(
+    *,
+    manifest: dict,
+    expected_files: set[str],
+    read_bytes: Callable[[str], bytes],
+) -> tuple[dict[str, str], dict[str, str]]:
+    missing = sorted(REQUIRED_V2_FILES - expected_files)
+    if missing:
+        raise RuntimeError(f"v2 release missing required TUI/release files: {missing}")
+
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version:
+        raise RuntimeError("v2 release manifest version missing")
+    if manifest.get("release_name") != f"g502x-onboard-{version}":
+        raise RuntimeError("v2 release_name/version mismatch")
+    if manifest.get("entrypoints") != {"cli": "g502x.py", "tui": "g502x_tui.py"}:
+        raise RuntimeError("v2 release entrypoints mismatch")
+
+    init_text = read_bytes("g502x_onboard/__init__.py").decode("utf-8")
+    match = VERSION_RE.search(init_text)
+    if not match or match.group(1) != version:
+        raise RuntimeError("v2 package version does not match release manifest")
+
+    return _verify_v2_requirements(
+        manifest.get("python_requirements"),
+        expected_files=expected_files,
+        read_bytes=read_bytes,
+    )
+
+
+def _verify_spdx_dependencies(
+    *,
+    sbom_json: dict,
+    version: str,
+    core_packages: dict[str, str],
+    optional_packages: dict[str, str],
+) -> None:
+    packages = sbom_json.get("packages")
+    if not isinstance(packages, list):
+        raise RuntimeError("SBOM packages table missing")
+    package_rows = {
+        row.get("SPDXID"): row
+        for row in packages
+        if isinstance(row, dict) and isinstance(row.get("SPDXID"), str)
+    }
+    root = package_rows.get("SPDXRef-Package-g502x-onboard")
+    if not isinstance(root, dict) or root.get("versionInfo") != version:
+        raise RuntimeError("SBOM root package version mismatch")
+
+    relationships = sbom_json.get("relationships")
+    if not isinstance(relationships, list):
+        raise RuntimeError("SBOM relationships table missing")
+    relationship_set = {
+        (
+            row.get("spdxElementId"),
+            row.get("relationshipType"),
+            row.get("relatedSpdxElement"),
+        )
+        for row in relationships
+        if isinstance(row, dict)
+    }
+
+    for name, dep_version in core_packages.items():
+        dep_id = "SPDXRef-Package-pypi-" + name.replace("_", "-")
+        row = package_rows.get(dep_id)
+        if not isinstance(row, dict) or row.get("versionInfo") != dep_version:
+            raise RuntimeError(f"SBOM core dependency mismatch: {name}")
+        if (
+            "SPDXRef-Package-g502x-onboard",
+            "DEPENDS_ON",
+            dep_id,
+        ) not in relationship_set:
+            raise RuntimeError(f"SBOM core dependency relationship missing: {name}")
+
+    for name, dep_version in optional_packages.items():
+        dep_id = "SPDXRef-Package-pypi-" + name.replace("_", "-")
+        row = package_rows.get(dep_id)
+        if not isinstance(row, dict) or row.get("versionInfo") != dep_version:
+            raise RuntimeError(f"SBOM optional TUI dependency mismatch: {name}")
+        if (
+            dep_id,
+            "OPTIONAL_DEPENDENCY_OF",
+            "SPDXRef-Package-g502x-onboard",
+        ) not in relationship_set:
+            raise RuntimeError(
+                f"SBOM optional TUI dependency relationship missing: {name}"
+            )
+
+
 def _verify_payload(
     *,
     manifest: dict,
@@ -73,10 +218,6 @@ def _verify_payload(
     source_commit = manifest.get("source_commit")
     if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
         raise RuntimeError("release manifest has invalid source_commit")
-
-    requirements = manifest.get("python_requirements")
-    if not isinstance(requirements, dict) or requirements.get("hash_checking") is not True:
-        raise RuntimeError("release manifest does not assert hash-checked dependencies")
 
     if manifest.get("archive_reproducible") is not True:
         raise RuntimeError("release manifest does not assert archive_reproducible=true")
@@ -132,6 +273,26 @@ def _verify_payload(
                 f"sha256 mismatch for {rel}: {actual_hash} != {expected_hash}"
             )
 
+    if fmt == "g502x-release-v1":
+        requirements = manifest.get("python_requirements")
+        if (
+            not isinstance(requirements, dict)
+            or requirements.get("hash_checking") is not True
+        ):
+            raise RuntimeError(
+                "historical release manifest does not assert hash-checked dependencies"
+            )
+        core_packages = requirements.get("packages") or {}
+        optional_packages: dict[str, str] = {}
+        version = manifest.get("version")
+    else:
+        core_packages, optional_packages = _verify_v2_contract(
+            manifest=manifest,
+            expected_files=expected_files,
+            read_bytes=read_bytes,
+        )
+        version = manifest["version"]
+
     sbom = manifest.get("sbom")
     if not isinstance(sbom, dict):
         raise RuntimeError("release manifest SBOM metadata missing")
@@ -151,6 +312,14 @@ def _verify_payload(
     namespace = sbom_json.get("documentNamespace")
     if not isinstance(namespace, str) or not namespace.endswith(source_commit):
         raise RuntimeError("SBOM namespace is not bound to source_commit")
+
+    if fmt == "g502x-release-v2":
+        _verify_spdx_dependencies(
+            sbom_json=sbom_json,
+            version=version,
+            core_packages=core_packages,
+            optional_packages=optional_packages,
+        )
 
 
 def verify_directory(root: str | Path) -> None:
@@ -239,9 +408,8 @@ def verify_archive(archive: str | Path) -> None:
         if any(info.is_dir() for info in all_infos):
             raise RuntimeError("canonical release ZIP must not contain directory entries")
 
-        infos = all_infos
         total_uncompressed = 0
-        for info in infos:
+        for info in all_infos:
             if info.flag_bits & 0x1:
                 raise RuntimeError(f"ZIP contains encrypted member: {info.filename}")
             if info.compress_type != zipfile.ZIP_STORED:
@@ -266,7 +434,7 @@ def verify_archive(archive: str | Path) -> None:
         if total_uncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES:
             raise RuntimeError("ZIP uncompressed payload exceeds safety limit")
 
-        names = [info.filename for info in infos]
+        names = [info.filename for info in all_infos]
         if len(names) != len(set(names)):
             raise RuntimeError("ZIP contains duplicate member names")
 
@@ -278,7 +446,7 @@ def verify_archive(archive: str | Path) -> None:
 
         rows: dict[str, zipfile.ZipInfo] = {}
         folded_rows: set[str] = set()
-        for path, info in zip(safe, infos):
+        for path, info in zip(safe, all_infos):
             mode = (info.external_attr >> 16) & 0xFFFF
             if stat.S_ISLNK(mode):
                 raise RuntimeError(f"ZIP contains symlink member: {info.filename}")

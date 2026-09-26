@@ -73,11 +73,55 @@ def parse_requirements_lock(text: str) -> dict[str, str]:
                 raise ValueError(
                     f"requirement pin has an invalid sha256 hash: {line}"
                 )
-        packages[name.lower()] = version
+        key = name.lower()
+        if key in packages:
+            raise ValueError(f"duplicate requirement pin: {name}")
+        packages[key] = version
 
     if not packages:
         raise ValueError("requirements lock contains no packages")
     return dict(sorted(packages.items()))
+
+
+def _spdx_dependency(
+    *,
+    name: str,
+    version: str,
+    scope: str,
+) -> dict:
+    dependency_metadata = {
+        "hid": {
+            "license": "MIT",
+            "download": "https://pypi.org/project/hid/",
+        },
+    }
+    meta = dependency_metadata.get(
+        name,
+        {"license": "NOASSERTION", "download": "NOASSERTION"},
+    )
+    package = {
+        "SPDXID": "SPDXRef-Package-pypi-" + name.replace("_", "-"),
+        "name": name,
+        "versionInfo": version,
+        "downloadLocation": meta["download"],
+        "filesAnalyzed": False,
+        "licenseConcluded": "NOASSERTION",
+        "licenseDeclared": meta["license"],
+        "copyrightText": "NOASSERTION",
+        "externalRefs": [
+            {
+                "referenceCategory": "PACKAGE-MANAGER",
+                "referenceType": "purl",
+                "referenceLocator": f"pkg:pypi/{name}@{version}",
+            }
+        ],
+        "comment": (
+            "Core runtime dependency from requirements.txt."
+            if scope == "core"
+            else "Optional Textual UI runtime dependency from requirements-tui.txt."
+        ),
+    }
+    return package
 
 
 def build_spdx(
@@ -86,12 +130,24 @@ def build_spdx(
     source_commit: str,
     source_timestamp: str,
     requirements_text: str,
+    optional_requirements_text: str | None = None,
     hidapi_files: Mapping[str, str | Path],
 ) -> dict:
     """Build a deterministic SPDX 2.3 dependency/vendor SBOM."""
-    packages = parse_requirements_lock(requirements_text)
-    root_id = "SPDXRef-Package-g502x-onboard"
+    core_packages = parse_requirements_lock(requirements_text)
+    optional_packages = (
+        parse_requirements_lock(optional_requirements_text)
+        if optional_requirements_text is not None
+        else {}
+    )
+    overlap = set(core_packages) & set(optional_packages)
+    if overlap:
+        raise ValueError(
+            "dependency cannot be both core and optional: "
+            + ", ".join(sorted(overlap))
+        )
 
+    root_id = "SPDXRef-Package-g502x-onboard"
     spdx_packages = [
         {
             "SPDXID": root_id,
@@ -106,43 +162,25 @@ def build_spdx(
     ]
     relationships = []
 
-    dependency_metadata = {
-        "hid": {
-            "license": "MIT",
-            "download": "https://pypi.org/project/hid/",
-        },
-    }
-
-    for name, dep_version in packages.items():
-        dep_id = "SPDXRef-Package-pypi-" + name.replace("_", "-")
-        meta = dependency_metadata.get(
-            name,
-            {"license": "NOASSERTION", "download": "NOASSERTION"},
-        )
-        spdx_packages.append(
-            {
-                "SPDXID": dep_id,
-                "name": name,
-                "versionInfo": dep_version,
-                "downloadLocation": meta["download"],
-                "filesAnalyzed": False,
-                "licenseConcluded": "NOASSERTION",
-                "licenseDeclared": meta["license"],
-                "copyrightText": "NOASSERTION",
-                "externalRefs": [
-                    {
-                        "referenceCategory": "PACKAGE-MANAGER",
-                        "referenceType": "purl",
-                        "referenceLocator": f"pkg:pypi/{name}@{dep_version}",
-                    }
-                ],
-            }
-        )
+    for name, dep_version in core_packages.items():
+        package = _spdx_dependency(name=name, version=dep_version, scope="core")
+        spdx_packages.append(package)
         relationships.append(
             {
                 "spdxElementId": root_id,
                 "relationshipType": "DEPENDS_ON",
-                "relatedSpdxElement": dep_id,
+                "relatedSpdxElement": package["SPDXID"],
+            }
+        )
+
+    for name, dep_version in optional_packages.items():
+        package = _spdx_dependency(name=name, version=dep_version, scope="optional_tui")
+        spdx_packages.append(package)
+        relationships.append(
+            {
+                "spdxElementId": package["SPDXID"],
+                "relationshipType": "OPTIONAL_DEPENDENCY_OF",
+                "relatedSpdxElement": root_id,
             }
         )
 
