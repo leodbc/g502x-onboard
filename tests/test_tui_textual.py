@@ -152,6 +152,30 @@ class HarnessFacade:
 
         observer(PersistentPhaseSnapshot(PersistentPhase.ARMED, prepared.kind, True))
         self.phase_events[PersistentPhase.ARMED].set()
+        if self.execute_mode == "cancel-at-armed":
+            for _ in range(400):
+                if cancellation.is_cancelled:
+                    self.cancel_seen.set()
+                    break
+                if self.release.wait(0.005):
+                    break
+            value = PersistentExecutionResult(
+                operation_kind=prepared.kind,
+                terminal_phase=PersistentPhase.FAILED,
+                success=False,
+                pre_write_status="cancelled-before-write",
+                writing_started=False,
+                reconciliation_completed=False,
+                post_validation_completed=False,
+                error_code=ErrorCode.CANCELLED,
+                message="cancelled before write",
+                phase_trace=(
+                    PersistentPhase.REVALIDATING,
+                    PersistentPhase.ARMED,
+                    PersistentPhase.FAILED,
+                ),
+            )
+            return OperationResult(ok=True, value=value, privacy=value.privacy)
         observer(PersistentPhaseSnapshot(PersistentPhase.WRITING, prepared.kind, False))
         self.phase_events[PersistentPhase.WRITING].set()
         if self.execute_mode == "fault-after-writing":
@@ -349,10 +373,10 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             await focus_id(pilot, app, "config-path")
-            await pilot.press("a", "p", "p", "l", "y", "g", "r", "v", "n", "s", "b", "d", "h")
+            await pilot.press("a", "p", "p", "l", "y", "q", "g", "r", "v", "n", "s", "b", "d", "h")
             await wait_until(
                 pilot,
-                lambda: app.tui_model.config_path_input == "applygrvnsbdh",
+                lambda: app.tui_model.config_path_input == "applyqgrvnsbdh",
                 "focused Input did not consume printable shortcut letters",
             )
             self.assertEqual(facade.calls, [])
@@ -458,6 +482,45 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(app.tui_model.terminal.error_code, ErrorCode.CANCELLED)
             self.assertFalse(app.tui_model.terminal.writing_started)
+
+    async def test_q_safe_quit_prewrite_requests_only_cooperative_cancellation(self):
+        for mode, phase in (
+            ("cancel-before-write", PersistentPhase.REVALIDATING),
+            ("cancel-at-armed", PersistentPhase.ARMED),
+        ):
+            with self.subTest(mode=mode):
+                facade = HarnessFacade(execute_mode=mode)
+                app = G502XTuiApp(facade=facade)
+                async with app.run_test(size=(80, 24)) as pilot:
+                    await self._keyboard_prepare_to_confirmation(app, pilot)
+                    operation_id = app.tui_model.active.operation_id
+                    app._accept_event(ConfirmationSubmitted(operation_id))
+                    await wait_thread_event(
+                        facade.phase_events[phase],
+                        f"persistent worker never reached {phase.value}",
+                    )
+                    await pilot.pause()
+
+                    # This must exercise the actual non-priority q binding after
+                    # the confirmation Input has been hidden/disabled.
+                    await pilot.press("q")
+                    await wait_thread_event(
+                        facade.cancel_seen,
+                        f"q did not route cooperative cancellation at {phase.value}",
+                    )
+                    facade.release.set()
+                    await wait_until(
+                        pilot,
+                        lambda: app.tui_model.terminal is not None,
+                        "authoritative cancellation result did not arrive",
+                    )
+                    self.assertEqual(
+                        app.tui_model.terminal.error_code,
+                        ErrorCode.CANCELLED,
+                    )
+                    self.assertFalse(
+                        app.tui_model.terminal.writing_started
+                    )
 
     async def test_safe_quit_during_writing_does_not_cancel_or_exit(self):
         facade = HarnessFacade(execute_mode="block-writing")

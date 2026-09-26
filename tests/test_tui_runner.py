@@ -286,5 +286,81 @@ class EffectRunnerTests(unittest.TestCase):
         self.assertEqual(runner._pending_cancellation, set())
 
 
+    def test_cancellation_ack_is_not_terminal_and_authoritative_success_still_wins(self):
+        emitted = []
+        phases = (
+            PersistentPhase.REVALIDATING,
+            PersistentPhase.ARMED,
+            PersistentPhase.WRITING,
+            PersistentPhase.RECONCILING,
+            PersistentPhase.POST_VALIDATING,
+        )
+        facade = PersistentFacade(phases=phases, success=True)
+        runner = EffectRunner(facade, emitted.append)
+        op = OperationId("op-cafebabe")
+
+        self.assertTrue(runner.run(RequestCooperativeCancellation(op)))
+        self.assertTrue(
+            any(isinstance(event, CancellationAcknowledged) for event in emitted)
+        )
+        self.assertTrue(
+            runner.run(
+                ExecutePreparedOperation(
+                    op, make_prepared(), "APPLY CONFIG"
+                )
+            )
+        )
+
+        self.assertTrue(facade.tokens[0].is_cancelled)
+        completed = [
+            event
+            for event in emitted
+            if isinstance(event, PersistentCompleted)
+        ]
+        self.assertEqual(len(completed), 1)
+        self.assertTrue(completed[0].result.success)
+
+    def test_base_exception_propagates_and_cancellation_authority_is_reclaimed(self):
+        class InterruptingFacade(PersistentFacade):
+            def execute_prepared(
+                self,
+                prepared,
+                confirmation,
+                *,
+                cancellation,
+                observer,
+            ):
+                self.calls += 1
+                self.tokens.append(cancellation)
+                observer(
+                    PersistentPhaseSnapshot(
+                        PersistentPhase.REVALIDATING,
+                        prepared.kind,
+                        True,
+                    )
+                )
+                raise KeyboardInterrupt()
+
+        emitted = []
+        facade = InterruptingFacade()
+        runner = EffectRunner(facade, emitted.append)
+        op = OperationId("op-acde1234")
+
+        with self.assertRaises(KeyboardInterrupt):
+            runner.run(
+                ExecutePreparedOperation(
+                    op, make_prepared(), "APPLY CONFIG"
+                )
+            )
+
+        self.assertEqual(facade.calls, 1)
+        self.assertEqual(runner._tokens, {})
+        self.assertEqual(runner._pending_cancellation, set())
+        self.assertEqual(runner._dispatched, {})
+        self.assertFalse(
+            any(isinstance(event, WorkerTransportFault) for event in emitted)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
