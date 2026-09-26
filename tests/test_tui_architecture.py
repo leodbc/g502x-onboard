@@ -239,7 +239,7 @@ print("CORE_CLI_IMPORT_OK")
         for row in rows:
             self.assertRegex(row, r"^[A-Za-z0-9_.-]+==[^\s]+\s+")
             self.assertIn("--hash=sha256:", row)
-            self.assertNotRegex(row.split()[0], r"[<>~=!]")
+            requirement = row.split()[0]\n            self.assertEqual(requirement.count("=="), 1)\n            name, version = requirement.split("==", 1)\n            self.assertTrue(name and version)\n            self.assertNotRegex(version, r"[<>~=!]")
 
     def test_effect_values_carry_no_live_authority(self):
         from dataclasses import fields
