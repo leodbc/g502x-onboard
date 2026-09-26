@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from itertools import count
 import re
 
 from g502x_onboard.application.models import (
@@ -14,6 +15,12 @@ from g502x_onboard.application.models import (
 )
 
 _OPERATION_ID_RE = re.compile(r"op-[0-9a-f]{8,64}\Z")
+
+_OPERATION_ISSUANCE_COUNTER = count(1)
+
+
+def _next_operation_issuance() -> int:
+    return next(_OPERATION_ISSUANCE_COUNTER)
 
 
 class Route(str, Enum):
@@ -35,7 +42,9 @@ class OperationAction(str, Enum):
     PROBE = "probe"
     STATUS = "status"
     VALIDATE = "validate"
+    PLAN = "plan"
     PROFILE_SWITCH = "profile-switch"
+    REPORT = "report"
     PREPARE_PERSISTENT = "prepare-persistent"
     REFRESH = "refresh"
 
@@ -48,6 +57,11 @@ class TerminalOutcome(str, Enum):
 @dataclass(frozen=True)
 class OperationId:
     value: str
+    issuance: int = field(
+        default_factory=_next_operation_issuance,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if not _OPERATION_ID_RE.fullmatch(self.value):
@@ -76,6 +90,7 @@ class ForegroundOperation:
     cancellation_deferred: bool = False
     application_cancellation_allowed: bool | None = None
     execution_requested: bool = False
+    worker_fault_unresolved: bool = False
 
     @property
     def non_cancellable(self) -> bool:
@@ -118,6 +133,10 @@ class TuiModel:
     prepared: PreparedOperation | None = None
     review_acknowledged: bool = False
     confirmation_input: str = ""
+    config_path_input: str = ""
+    backup_path_input: str = ""
+    profile_target_input: str = "1"
+    profile_confirmation_input: str = ""
     last_result: PresentationPayload | None = None
     last_error: ApplicationError | None = None
     terminal: TerminalState | None = None

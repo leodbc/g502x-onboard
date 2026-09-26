@@ -35,6 +35,26 @@ class ChangePrivacySurface:
 
 
 @dataclass(frozen=True)
+class ConfigPathChanged:
+    value: str
+
+
+@dataclass(frozen=True)
+class BackupPathChanged:
+    value: str
+
+
+@dataclass(frozen=True)
+class ProfileTargetChanged:
+    value: str
+
+
+@dataclass(frozen=True)
+class ProfileConfirmationChanged:
+    value: str
+
+
+@dataclass(frozen=True)
 class CompatibilityChanged:
     read_only: bool
     reason: ApplicationError | None = None
@@ -102,6 +122,12 @@ class PersistentCompleted:
 
 @dataclass(frozen=True)
 class ApplicationFailed:
+    operation_id: OperationId
+    error: ApplicationError
+
+
+@dataclass(frozen=True)
+class WorkerTransportFault:
     operation_id: OperationId
     error: ApplicationError
 

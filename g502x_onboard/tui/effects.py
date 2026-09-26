@@ -10,12 +10,17 @@ from .model import OperationAction, OperationId
 class StartForegroundOperation:
     operation_id: OperationId
     action: OperationAction
+    config_path: str | None = None
+    profile_target: int | None = None
+    confirmation: str | None = None
 
 
 @dataclass(frozen=True)
 class PreparePersistentOperation:
     operation_id: OperationId
     kind: PersistentOperationKind
+    config_path: str | None = None
+    backup_path: str | None = None
 
 
 @dataclass(frozen=True)
