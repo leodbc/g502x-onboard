@@ -262,7 +262,20 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(app.query_one("#persistent-confirm", Input).display)
 
         await focus_id(pilot, app, "persistent-confirm")
-        for key in ("A", "P", "P", "L", "Y", "space", "C", "O", "N", "F", "I", "G"):
+        for key in (
+            "shift+a",
+            "shift+p",
+            "shift+p",
+            "shift+l",
+            "shift+y",
+            "space",
+            "shift+c",
+            "shift+o",
+            "shift+n",
+            "shift+f",
+            "shift+i",
+            "shift+g",
+        ):
             await pilot.press(key)
         await pilot.pause()
         self.assertEqual(app.tui_model.confirmation_input, "APPLY CONFIG")
