@@ -15,10 +15,16 @@ from g502x_onboard.application.models import (
     PersistentOperationKind,
     PersistentPhase,
     PersistentPhaseSnapshot,
+    PlanSnapshot,
     PreparedOperation,
     PrivacyClass,
     ProbeSnapshot,
+    ProfileSwitchResult,
+    PublicReportSnapshot,
+    RestoreBackupReview,
+    RestoreBaselineReview,
     StatusSnapshot,
+    ValidationSnapshot,
     WriteEligibility,
 )
 from g502x_onboard.tui.events import ConfirmationSubmitted
@@ -34,7 +40,9 @@ except ModuleNotFoundError:
     G502XTuiApp = None
 
 
-def make_prepared() -> PreparedOperation:
+def make_prepared(
+    kind: PersistentOperationKind = PersistentOperationKind.APPLY_CONFIG,
+) -> PreparedOperation:
     compatibility = CompatibilityObservation(
         architecture="compatible",
         transport="tested",
@@ -42,10 +50,8 @@ def make_prepared() -> PreparedOperation:
         write_allowed=True,
         eligibility=WriteEligibility.ELIGIBLE,
     )
-    return PreparedOperation(
-        preparation_id="prep-harness",
-        kind=PersistentOperationKind.APPLY_CONFIG,
-        review=ApplyReview(
+    if kind is PersistentOperationKind.APPLY_CONFIG:
+        review = ApplyReview(
             config_name="x.json",
             config_path="x.json",
             enabled_profiles=(2,),
@@ -53,12 +59,33 @@ def make_prepared() -> PreparedOperation:
             managed_sectors=(0, 2, 8),
             warnings=(),
             plan_digest="digest",
-        ),
+        )
+        phrase = "APPLY CONFIG"
+    elif kind is PersistentOperationKind.RESTORE_BACKUP:
+        review = RestoreBackupReview(
+            backup_name="backup.bin",
+            managed_sectors=(0, 2, 8),
+            protected_sectors=(6, 7),
+            target_digest="digest",
+        )
+        phrase = "RESTORE BACKUP"
+    else:
+        review = RestoreBaselineReview(
+            managed_sectors=(0, 2, 8),
+            protected_sectors=(6, 7),
+            target_digest="digest",
+        )
+        phrase = "RESTORE BASELINE"
+
+    return PreparedOperation(
+        preparation_id=f"prep-{kind.value}",
+        kind=kind,
+        review=review,
         target_digest="digest",
         compatibility=compatibility,
         observed_preconditions=("safe",),
         host_guard_clear=True,
-        required_confirmation_phrase="APPLY CONFIG",
+        required_confirmation_phrase=phrase,
     )
 
 
@@ -113,9 +140,56 @@ class HarnessFacade:
         )
         return OperationResult(ok=True, value=value, privacy=value.privacy)
 
+
+    def validate(self):
+        self.calls.append(("validate",))
+        value = ValidationSnapshot(
+            ok=True,
+            enabled_profiles=(1, 2),
+            error_count=0,
+            warning_count=0,
+            referenced_macro_starts=0,
+            recovery_ok=True,
+        )
+        return OperationResult(ok=True, value=value, privacy=value.privacy)
+
+    def plan(self, config_path):
+        self.calls.append(("plan", str(config_path)))
+        value = PlanSnapshot(
+            config_path=str(config_path),
+            plan={"enabled_profiles": [2]},
+            rendered_json='{"enabled_profiles":[2]}',
+        )
+        return OperationResult(ok=True, value=value, privacy=value.privacy)
+
+    def switch_profile(self, target, confirmation):
+        self.calls.append(("switch_profile", target, confirmation))
+        value = ProfileSwitchResult(
+            active_profile=target,
+            confirmation_phrase=confirmation,
+        )
+        return OperationResult(ok=True, value=value, privacy=value.privacy)
+
+    def report_probe(self, *, pid, index):
+        self.calls.append(("report_probe", pid, index))
+        value = PublicReportSnapshot(
+            payload={"format": "g502x-device-report-v1", "privacy": "shareable"}
+        )
+        return OperationResult(ok=True, value=value, privacy=value.privacy)
+
     def prepare_apply(self, config_path):
         self.calls.append(("prepare_apply", str(config_path)))
         value = make_prepared()
+        return OperationResult(ok=True, value=value, privacy=value.privacy)
+
+    def prepare_restore_backup(self, backup_path):
+        self.calls.append(("prepare_restore_backup", str(backup_path)))
+        value = make_prepared(PersistentOperationKind.RESTORE_BACKUP)
+        return OperationResult(ok=True, value=value, privacy=value.privacy)
+
+    def prepare_restore_baseline(self):
+        self.calls.append(("prepare_restore_baseline",))
+        value = make_prepared(PersistentOperationKind.RESTORE_BASELINE)
         return OperationResult(ok=True, value=value, privacy=value.privacy)
 
     def execute_prepared(self, prepared, confirmation, *, cancellation, observer):
@@ -381,6 +455,142 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(facade.calls, [])
             self.assertIsNone(app.tui_model.active)
+
+    async def test_keyboard_shortcuts_cover_all_remaining_operation_entrypoints(self):
+        facade = HarnessFacade()
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            async def press_and_wait(key, call_name):
+                app.set_focus(None)
+                await pilot.press(key)
+                await wait_until(
+                    pilot,
+                    lambda: (
+                        any(call[0] == call_name for call in facade.calls)
+                        and app.tui_model.active is None
+                    ),
+                    f"{key} did not complete {call_name}",
+                )
+
+            await press_and_wait("p", "probe")
+            await press_and_wait("r", "status")
+            await press_and_wait("v", "validate")
+
+            await focus_id(pilot, app, "config-path")
+            await pilot.press("x", ".", "j", "s", "o", "n")
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.config_path_input == "x.json",
+                "plan path did not reach model",
+            )
+            await press_and_wait("n", "plan")
+            await press_and_wait("g", "report_probe")
+
+            await focus_id(pilot, app, "profile-target")
+            await pilot.press("backspace", "2")
+            await focus_id(pilot, app, "profile-confirmation")
+            profile_confirmation = app.query_one("#profile-confirmation", Input)
+            for character in "ENTER PROFILE 2":
+                key = "space" if character == " " else character
+                profile_confirmation.post_message(
+                    textual_events.Key(key, character)
+                )
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.tui_model.profile_target_input == "2"
+                    and app.tui_model.profile_confirmation_input == "ENTER PROFILE 2"
+                ),
+                "profile keyboard inputs did not reach model",
+            )
+            await press_and_wait("s", "switch_profile")
+
+            # Each persistent shortcut must reach the canonical preparation path.
+            # Esc then abandons the prepared capability without executing it.
+            await focus_id(pilot, app, "config-path")
+            await pilot.press("x", ".", "j", "s", "o", "n")
+            app.set_focus(None)
+            await pilot.press("a")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.tui_model.prepared is not None
+                    and any(call[0] == "prepare_apply" for call in facade.calls)
+                ),
+                "a did not prepare apply",
+            )
+            await pilot.press("escape")
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.active is None,
+                "Esc did not abandon apply preparation",
+            )
+
+            await focus_id(pilot, app, "backup-path")
+            for character in "backup.bin":
+                await pilot.press(character)
+            app.set_focus(None)
+            await pilot.press("b")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.tui_model.prepared is not None
+                    and any(
+                        call[0] == "prepare_restore_backup"
+                        for call in facade.calls
+                    )
+                ),
+                "b did not prepare backup restore",
+            )
+            await pilot.press("escape")
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.active is None,
+                "Esc did not abandon backup preparation",
+            )
+
+            app.set_focus(None)
+            await pilot.press("l")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.tui_model.prepared is not None
+                    and any(
+                        call[0] == "prepare_restore_baseline"
+                        for call in facade.calls
+                    )
+                ),
+                "l did not prepare baseline restore",
+            )
+            await pilot.press("escape")
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.active is None,
+                "Esc did not abandon baseline preparation",
+            )
+
+            calls_before_local_ui = len(facade.calls)
+            app.set_focus(None)
+            await pilot.press("h")
+            await pilot.press("h")
+            await pilot.press("d")
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertEqual(len(facade.calls), calls_before_local_ui)
+
+            call_names = [call[0] for call in facade.calls]
+            for expected in (
+                "probe",
+                "status",
+                "validate",
+                "plan",
+                "report_probe",
+                "switch_profile",
+                "prepare_apply",
+                "prepare_restore_backup",
+                "prepare_restore_baseline",
+            ):
+                self.assertIn(expected, call_names)
 
     async def _keyboard_prepare_to_confirmation(self, app, pilot):
         await focus_id(pilot, app, "config-path")
