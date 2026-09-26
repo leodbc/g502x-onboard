@@ -371,17 +371,17 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
                 "sensitive widget inputs did not populate",
             )
 
-            await pilot.resize_terminal(79, 23)
-            await wait_until(
-                pilot,
-                lambda: app.query_one("#constrained", Static).display,
-                "constrained layout did not settle after resize",
-            )
+            # The separate below-minimum test exercises Textual's real terminal-size
+            # path. Here force the same hidden-layout branch deterministically so
+            # this privacy regression is not coupled to terminal-resize timing.
+            with patch.object(app, "_layout_constrained", return_value=True):
+                app._render()
+                self.assertTrue(app.query_one("#constrained", Static).display)
 
-            # LOCAL_SENSITIVE -> PRIVATE_DIAGNOSTIC -> SHAREABLE.
-            app.action_privacy()
-            app.action_privacy()
-            await pilot.pause()
+                # LOCAL_SENSITIVE -> PRIVATE_DIAGNOSTIC -> SHAREABLE.
+                app.action_privacy()
+                app.action_privacy()
+                await pilot.pause()
 
             self.assertIs(app.tui_model.surface_privacy, PrivacyClass.SHAREABLE)
             self.assertEqual(app.tui_model.config_path_input, "")
