@@ -145,6 +145,9 @@ def _clear_disallowed(model: TuiModel, surface: PrivacyClass) -> TuiModel:
         confirmation_input=(model.confirmation_input if prepared is not None else ""),
         config_path_input=("" if clear_local_inputs else model.config_path_input),
         backup_path_input=("" if clear_local_inputs else model.backup_path_input),
+        profile_confirmation_input=(
+            "" if clear_local_inputs else model.profile_confirmation_input
+        ),
         last_result=_payload_for_surface(model.last_result, surface),
         last_error=_payload_for_surface(model.last_error, surface),
         read_only_reason=_payload_for_surface(model.read_only_reason, surface),
@@ -513,6 +516,11 @@ def update(
             terminal=terminal,
             last_result=payload,
             last_error=None,
+            profile_confirmation_input=(
+                ""
+                if model.active.action is OperationAction.PROFILE_SWITCH
+                else model.profile_confirmation_input
+            ),
             route=Route.RESULT,
         ), ()
 
@@ -579,6 +587,13 @@ def update(
             confirmation_input=(
                 "" if persistent else model.confirmation_input
             ),
+            config_path_input=("" if persistent else model.config_path_input),
+            backup_path_input=("" if persistent else model.backup_path_input),
+            profile_confirmation_input=(
+                ""
+                if model.active.action is OperationAction.PROFILE_SWITCH
+                else model.profile_confirmation_input
+            ),
             terminal=terminal,
             last_result=None,
             last_error=error,
@@ -604,6 +619,8 @@ def update(
             prepared=None,
             review_acknowledged=False,
             confirmation_input="",
+            config_path_input="",
+            backup_path_input="",
             last_result=None,
             last_error=error,
             terminal=terminal,
@@ -649,6 +666,8 @@ def update(
                 prepared=None,
                 review_acknowledged=False,
                 confirmation_input="",
+                config_path_input="",
+                backup_path_input="",
                 terminal=terminal,
                 last_result=None,
                 last_error=_payload_for_surface(
@@ -675,6 +694,8 @@ def update(
                 prepared=None,
                 review_acknowledged=False,
                 confirmation_input="",
+                config_path_input="",
+                backup_path_input="",
                 terminal=terminal,
                 last_result=payload,
                 last_error=None,
@@ -701,6 +722,8 @@ def update(
             prepared=None,
             review_acknowledged=False,
             confirmation_input="",
+            config_path_input="",
+            backup_path_input="",
             terminal=terminal,
             last_result=None,
             last_error=_payload_for_surface(
