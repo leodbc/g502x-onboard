@@ -8,6 +8,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import Button, Checkbox, Input, Static
 
 from g502x_onboard.application.models import PersistentOperationKind, PrivacyClass
@@ -67,8 +68,9 @@ class G502XTuiApp(App[None]):
         Binding("g", "report", "Public report"),
         Binding("h", "help", "Help"),
         Binding("d", "privacy", "Privacy"),
-        Binding("escape", "cancel_or_back", "Cancel/back", show=False),
+        Binding("escape", "cancel_or_back", "Cancel/back", show=False, priority=True),
         Binding("q", "safe_quit", "Quit"),
+        Binding("ctrl+q", "safe_quit", "Safe quit", show=False, priority=True),
     ]
 
     CSS = """
@@ -447,8 +449,15 @@ class G502XTuiApp(App[None]):
         width = self.size.width
         height = self.size.height
         constrained = width < self.MINIMUM_SIZE[0] or height < self.MINIMUM_SIZE[1]
-        self.query_one("#constrained", Static).display = constrained
-        self.query_one("#main", Vertical).display = not constrained
+        try:
+            constrained_widget = self.query_one("#constrained", Static)
+            main_widget = self.query_one("#main", Vertical)
+        except NoMatches:
+            # A worker callback may arrive while Textual is tearing down the
+            # screen. State remains authoritative; rendering is simply over.
+            return
+        constrained_widget.display = constrained
+        main_widget.display = not constrained
         if constrained:
             return
 
@@ -535,7 +544,7 @@ class G502XTuiApp(App[None]):
                     "HELP — local presentation only; opening help performs zero facade/backend calls.",
                     "Keys: p probe | r refresh/status | v validate | n plan | a apply",
                     "b restore backup | l restore baseline | s profile | g public report",
-                    "h help | d privacy surface | Esc cooperative cancel/back | q safe quit",
+                    "h help | d privacy surface | Esc cooperative cancel/back | q or Ctrl+Q safe quit",
                     "Paths are LOCAL SENSITIVE. Persistent writes always require prepare/review/exact confirmation.",
                 ]
             )
