@@ -5,6 +5,7 @@ from dataclasses import replace
 from g502x_onboard.application.models import (
     ApplicationError,
     ErrorCode,
+    PersistentOperationKind,
     PersistentPhase,
     PrivacyClass,
 )
@@ -19,10 +20,12 @@ from .effects import (
 from .events import (
     ApplicationCompleted,
     ApplicationFailed,
+    BackupPathChanged,
     CancellationAcknowledged,
     CancellationRequested,
     ChangePrivacySurface,
     CompatibilityChanged,
+    ConfigPathChanged,
     ConfirmationChanged,
     ConfirmationSubmitted,
     EnterReview,
@@ -33,10 +36,13 @@ from .events import (
     PersistentProgress,
     PreparationInvalidated,
     PreparedReceived,
+    ProfileConfirmationChanged,
+    ProfileTargetChanged,
     RefreshRequested,
     ReviewAcknowledged,
     SetDisclosure,
     SetHelp,
+    WorkerTransportFault,
 )
 from .model import (
     FocusIntent,
@@ -55,6 +61,10 @@ Event = (
     | SetHelp
     | SetDisclosure
     | ChangePrivacySurface
+    | ConfigPathChanged
+    | BackupPathChanged
+    | ProfileTargetChanged
+    | ProfileConfirmationChanged
     | CompatibilityChanged
     | OperationRequested
     | OperationStarted
@@ -67,6 +77,7 @@ Event = (
     | ApplicationCompleted
     | PersistentCompleted
     | ApplicationFailed
+    | WorkerTransportFault
     | PreparationInvalidated
     | CancellationRequested
     | CancellationAcknowledged
@@ -122,6 +133,7 @@ def _clear_disallowed(model: TuiModel, surface: PrivacyClass) -> TuiModel:
         }
     ):
         active = None
+    clear_local_inputs = surface is PrivacyClass.SHAREABLE
     return replace(
         model,
         active=active,
@@ -131,6 +143,8 @@ def _clear_disallowed(model: TuiModel, surface: PrivacyClass) -> TuiModel:
             model.review_acknowledged if prepared is not None else False
         ),
         confirmation_input=(model.confirmation_input if prepared is not None else ""),
+        config_path_input=("" if clear_local_inputs else model.config_path_input),
+        backup_path_input=("" if clear_local_inputs else model.backup_path_input),
         last_result=_payload_for_surface(model.last_result, surface),
         last_error=_payload_for_surface(model.last_error, surface),
         read_only_reason=_payload_for_surface(model.read_only_reason, surface),
@@ -160,6 +174,12 @@ def _terminal_payload(
     return payload if privacy_allows(surface, privacy) else None
 
 
+def _local_surface_for_input(model: TuiModel, value: str) -> PrivacyClass:
+    if value and model.surface_privacy is PrivacyClass.SHAREABLE:
+        return PrivacyClass.LOCAL_SENSITIVE
+    return model.surface_privacy
+
+
 def update(
     model: TuiModel, event: Event
 ) -> tuple[TuiModel, tuple[Effect, ...]]:
@@ -179,6 +199,34 @@ def update(
 
     if isinstance(event, ChangePrivacySurface):
         return _clear_disallowed(model, event.privacy), ()
+
+    if isinstance(event, ConfigPathChanged):
+        if model.active is not None:
+            return model, ()
+        return replace(
+            model,
+            config_path_input=event.value,
+            surface_privacy=_local_surface_for_input(model, event.value),
+        ), ()
+
+    if isinstance(event, BackupPathChanged):
+        if model.active is not None:
+            return model, ()
+        return replace(
+            model,
+            backup_path_input=event.value,
+            surface_privacy=_local_surface_for_input(model, event.value),
+        ), ()
+
+    if isinstance(event, ProfileTargetChanged):
+        if model.active is not None:
+            return model, ()
+        return replace(model, profile_target_input=event.value), ()
+
+    if isinstance(event, ProfileConfirmationChanged):
+        if model.active is not None:
+            return model, ()
+        return replace(model, profile_confirmation_input=event.value), ()
 
     if isinstance(event, CompatibilityChanged):
         reason = _payload_for_surface(event.reason, model.surface_privacy)
@@ -223,15 +271,45 @@ def update(
                 return replace(next_model, active=None, last_error=error), ()
             return next_model, (
                 PreparePersistentOperation(
-                    event.operation_id, event.persistent_kind
+                    event.operation_id,
+                    event.persistent_kind,
+                    config_path=(
+                        model.config_path_input
+                        if event.persistent_kind is PersistentOperationKind.APPLY_CONFIG
+                        and model.config_path_input
+                        else None
+                    ),
+                    backup_path=(
+                        model.backup_path_input
+                        if event.persistent_kind is PersistentOperationKind.RESTORE_BACKUP
+                        and model.backup_path_input
+                        else None
+                    ),
                 ),
             )
         if event.action is OperationAction.REFRESH:
             return next_model, (
                 RequestExplicitRefresh(event.operation_id),
             )
+        profile_target = None
+        confirmation = None
+        config_path = None
+        if event.action is OperationAction.PROFILE_SWITCH:
+            try:
+                profile_target = int(model.profile_target_input)
+            except ValueError:
+                profile_target = None
+            confirmation = model.profile_confirmation_input
+        elif event.action is OperationAction.PLAN:
+            config_path = model.config_path_input or None
         return next_model, (
-            StartForegroundOperation(event.operation_id, event.action),
+            StartForegroundOperation(
+                event.operation_id,
+                event.action,
+                config_path=config_path,
+                profile_target=profile_target,
+                confirmation=confirmation,
+            ),
         )
 
     if isinstance(event, OperationStarted):
@@ -324,6 +402,7 @@ def update(
             or model.prepared is None
             or not model.review_acknowledged
             or model.active.execution_requested
+            or model.active.cancellation_requested
             or model.active.phase is not PersistentPhase.CONFIRMING
             or model.confirmation_input.strip()
             != model.prepared.required_confirmation_phrase
@@ -436,6 +515,41 @@ def update(
             last_error=None,
             route=Route.RESULT,
         ), ()
+
+    if isinstance(event, WorkerTransportFault):
+        if not _is_current(model, event.operation_id):
+            return model, ()
+        if (
+            model.active.persistent_kind is not None
+            and model.active.execution_requested
+            and model.active.non_cancellable
+        ):
+            safe_error = event.error
+            if safe_error.privacy is not PrivacyClass.SHAREABLE:
+                safe_error = ApplicationError(
+                    ErrorCode.BACKEND_FAILURE,
+                    "adapter transport fault during a non-cancellable transaction; hardware outcome is unresolved",
+                    PrivacyClass.SHAREABLE,
+                )
+            active = replace(
+                model.active, worker_fault_unresolved=True
+            )
+            notice = PresentationPayload(
+                "UNRESOLVED ADAPTER FAULT: keep this process open; do not retry while hardware outcome is unknown",
+                PrivacyClass.SHAREABLE,
+            )
+            return replace(
+                model,
+                active=active,
+                last_error=safe_error,
+                transient_notice=notice,
+                terminal=None,
+                route=Route.OPERATION,
+            ), ()
+        return update(
+            model,
+            ApplicationFailed(event.operation_id, event.error),
+        )
 
     if isinstance(event, ApplicationFailed):
         if not _is_current(model, event.operation_id):

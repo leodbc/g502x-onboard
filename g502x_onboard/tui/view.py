@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from g502x_onboard.application.models import (
+    ApplyReview,
     ErrorCode,
     PersistentOperationKind,
     PersistentPhase,
     PreparedOperation,
     PrivacyClass,
+    RestoreBackupReview,
+    RestoreBaselineReview,
 )
 from .model import (
     OperationAction,
@@ -34,6 +37,7 @@ class ViewModel:
     phase_label: str | None
     review_visible: bool
     prepared: PreparedOperation | None
+    review_lines: tuple[str, ...]
     review_acknowledged: bool
     confirmation_visible: bool
     confirmation_input: str
@@ -41,6 +45,7 @@ class ViewModel:
     confirmation_matches: bool
     cancellation_available: bool
     non_cancellable: bool
+    worker_fault_unresolved: bool
     safety_label: str | None
     terminal_outcome: TerminalOutcome | None
     terminal_label: str | None
@@ -49,6 +54,10 @@ class ViewModel:
     detail: str | None
     help_open: bool
     disclosure_message: str | None
+    config_path_input: str
+    backup_path_input: str
+    profile_target_input: str
+    profile_confirmation_input: str
     progress_percent: int | None = None
 
 
@@ -60,6 +69,54 @@ def _privacy_label(value: PrivacyClass) -> str:
     return "PRIVATE"
 
 
+def _review_lines(prepared: PreparedOperation | None) -> tuple[str, ...]:
+    if prepared is None:
+        return ()
+    review = prepared.review
+    common = [
+        f"Operation: {prepared.kind.value}",
+        f"Target digest: {prepared.target_digest}",
+        f"Compatibility: {prepared.compatibility.architecture} / {prepared.compatibility.transport}",
+        f"Write eligibility: {'eligible' if prepared.compatibility.write_allowed else 'read-only'}",
+        f"Host guard: {'clear' if prepared.host_guard_clear else 'blocked'}",
+        "Preconditions: " + (", ".join(prepared.observed_preconditions) or "none"),
+        f"Exact confirmation: {prepared.required_confirmation_phrase}",
+    ]
+    if isinstance(review, ApplyReview):
+        lines = [
+            f"Config: {review.config_name}",
+            "Enabled profiles: " + (", ".join(map(str, review.enabled_profiles)) or "none"),
+            "Managed sectors: " + ", ".join(map(str, review.managed_sectors)),
+        ]
+        if review.profile_names:
+            lines.append(
+                "Profile names: "
+                + ", ".join(f"{number}={name}" for number, name in review.profile_names)
+            )
+        if review.warnings:
+            lines.extend(f"Warning: {warning}" for warning in review.warnings)
+        return tuple(common + lines)
+    if isinstance(review, RestoreBackupReview):
+        return tuple(
+            common
+            + [
+                f"Backup: {review.backup_name}",
+                "Managed sectors: " + ", ".join(map(str, review.managed_sectors)),
+                "Protected sectors: " + ", ".join(map(str, review.protected_sectors)),
+            ]
+        )
+    if isinstance(review, RestoreBaselineReview):
+        return tuple(
+            common
+            + [
+                "Target: active validated baseline",
+                "Managed sectors: " + ", ".join(map(str, review.managed_sectors)),
+                "Protected sectors: " + ", ".join(map(str, review.protected_sectors)),
+            ]
+        )
+    return tuple(common)
+
+
 def view(model: TuiModel) -> ViewModel:
     active = model.active
     phase = active.phase if active is not None else (
@@ -67,6 +124,7 @@ def view(model: TuiModel) -> ViewModel:
     )
     non_cancellable = bool(active and active.non_cancellable)
     cancellation_available = bool(active and active.cancellation_available)
+    worker_fault_unresolved = bool(active and active.worker_fault_unresolved)
 
     prepared = (
         model.prepared
@@ -151,6 +209,12 @@ def view(model: TuiModel) -> ViewModel:
         == prepared.required_confirmation_phrase
     )
 
+    safety_label = None
+    if worker_fault_unresolved:
+        safety_label = "UNRESOLVED ADAPTER FAULT — HARDWARE OUTCOME UNKNOWN"
+    elif non_cancellable:
+        safety_label = "NON-CANCELLABLE SAFETY PHASE"
+
     return ViewModel(
         route=model.route,
         privacy=model.surface_privacy,
@@ -174,6 +238,7 @@ def view(model: TuiModel) -> ViewModel:
         phase_label=(phase.value if phase is not None else None),
         review_visible=review_visible,
         prepared=prepared,
+        review_lines=_review_lines(prepared),
         review_acknowledged=model.review_acknowledged,
         confirmation_visible=confirmation_visible,
         confirmation_input=(
@@ -187,9 +252,8 @@ def view(model: TuiModel) -> ViewModel:
         confirmation_matches=confirmation_matches,
         cancellation_available=cancellation_available,
         non_cancellable=non_cancellable,
-        safety_label=(
-            "NON-CANCELLABLE SAFETY PHASE" if non_cancellable else None
-        ),
+        worker_fault_unresolved=worker_fault_unresolved,
+        safety_label=safety_label,
         terminal_outcome=terminal_outcome,
         terminal_label=terminal_label,
         error_code=error_code,
@@ -199,5 +263,9 @@ def view(model: TuiModel) -> ViewModel:
         disclosure_message=(
             disclosure.message if disclosure is not None else None
         ),
+        config_path_input=model.config_path_input,
+        backup_path_input=model.backup_path_input,
+        profile_target_input=model.profile_target_input,
+        profile_confirmation_input=model.profile_confirmation_input,
         progress_percent=None,
     )
