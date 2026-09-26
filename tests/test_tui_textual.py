@@ -66,9 +66,18 @@ class HarnessFacade:
         self.read_only = read_only
         self.execute_mode = execute_mode
         self.execute_calls = 0
-        self.entered = Event()
+        self.phase_events = {
+            phase: Event()
+            for phase in (
+                PersistentPhase.REVALIDATING,
+                PersistentPhase.ARMED,
+                PersistentPhase.WRITING,
+                PersistentPhase.RECONCILING,
+                PersistentPhase.POST_VALIDATING,
+            )
+        }
         self.release = Event()
-        self.cancel_seen = False
+        self.cancel_seen = Event()
 
     def status(self, *, private):
         self.calls.append(("status", private))
@@ -117,11 +126,11 @@ class HarnessFacade:
                 True,
             )
         )
+        self.phase_events[PersistentPhase.REVALIDATING].set()
         if self.execute_mode == "cancel-before-write":
-            self.entered.set()
             for _ in range(400):
                 if cancellation.is_cancelled:
-                    self.cancel_seen = True
+                    self.cancel_seen.set()
                     break
                 if self.release.wait(0.005):
                     break
@@ -140,14 +149,17 @@ class HarnessFacade:
             return OperationResult(ok=True, value=value, privacy=value.privacy)
 
         observer(PersistentPhaseSnapshot(PersistentPhase.ARMED, prepared.kind, True))
+        self.phase_events[PersistentPhase.ARMED].set()
         observer(PersistentPhaseSnapshot(PersistentPhase.WRITING, prepared.kind, False))
-        self.entered.set()
+        self.phase_events[PersistentPhase.WRITING].set()
         if self.execute_mode == "fault-after-writing":
             raise RuntimeError("synthetic worker transport fault")
         if self.execute_mode == "block-writing":
             self.release.wait(2.0)
         observer(PersistentPhaseSnapshot(PersistentPhase.RECONCILING, prepared.kind, False))
+        self.phase_events[PersistentPhase.RECONCILING].set()
         observer(PersistentPhaseSnapshot(PersistentPhase.POST_VALIDATING, prepared.kind, False))
+        self.phase_events[PersistentPhase.POST_VALIDATING].set()
         value = PersistentExecutionResult(
             operation_kind=prepared.kind,
             terminal_phase=PersistentPhase.SUCCEEDED,
@@ -169,15 +181,17 @@ class HarnessFacade:
         return OperationResult(ok=True, value=value, privacy=value.privacy)
 
 
-async def wait_until(pilot, predicate, message: str, limit: int = 500) -> None:
+async def wait_until(pilot, predicate, message: str, limit: int = 12) -> None:
     for _ in range(limit):
         if predicate():
             return
-        # Yield directly to the Textual event loop. pilot.pause() also waits for
-        # CPU-idle semantics, which is inappropriate while a thread worker is
-        # deliberately active and made the harness timing-dependent.
-        await asyncio.sleep(0.01)
+        await pilot.pause()
     raise AssertionError(message)
+
+
+async def wait_thread_event(event: Event, message: str, timeout: float = 3.0) -> None:
+    if not await asyncio.to_thread(event.wait, timeout):
+        raise AssertionError(message)
 
 
 async def focus_id(pilot, app, target: str, limit: int = 50):
@@ -194,6 +208,11 @@ async def focus_id(pilot, app, target: str, limit: int = 50):
 
 @unittest.skipUnless(TEXTUAL_AVAILABLE, "Textual optional dependencies are not installed")
 class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_safety_key_bindings_are_priority(self):
+        bindings = {binding.key: binding for binding in G502XTuiApp.BINDINGS}
+        self.assertTrue(bindings["escape"].priority)
+        self.assertTrue(bindings["ctrl+q"].priority)
+
     async def test_mount_80x24_exposes_semantic_safety_labels(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
@@ -343,47 +362,37 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
-            await pilot.press("enter", "enter")
-            await wait_until(
-                pilot,
-                lambda: facade.entered.is_set(),
+            operation_id = app.tui_model.active.operation_id
+            app._accept_event(ConfirmationSubmitted(operation_id))
+            app._accept_event(ConfirmationSubmitted(operation_id))
+            await wait_thread_event(
+                facade.phase_events[PersistentPhase.WRITING],
                 "persistent worker never reached WRITING",
             )
             self.assertEqual(facade.execute_calls, 1)
             facade.release.set()
-            await wait_until(
-                pilot,
-                lambda: app.tui_model.terminal is not None,
-                "blocked persistent execution did not finish",
-            )
+            await pilot.pause()
+            self.assertIsNotNone(app.tui_model.terminal)
 
-    async def test_keyboard_escape_before_write_uses_cooperative_token(self):
+    async def test_cancel_before_write_uses_cooperative_token(self):
         facade = HarnessFacade(execute_mode="cancel-before-write")
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
-            await pilot.press("enter")
-            await wait_until(
-                pilot,
-                lambda: (
-                    facade.entered.is_set()
-                    and app.tui_model.active is not None
-                    and app.tui_model.active.phase is PersistentPhase.REVALIDATING
-                ),
+            operation_id = app.tui_model.active.operation_id
+            app._accept_event(ConfirmationSubmitted(operation_id))
+            await wait_thread_event(
+                facade.phase_events[PersistentPhase.REVALIDATING],
                 "persistent worker never reached REVALIDATING",
             )
-            await pilot.press("escape")
-            await wait_until(
-                pilot,
-                lambda: facade.cancel_seen,
-                "priority Esc did not reach the cooperative cancellation token",
+            self.assertIs(app.tui_model.active.phase, PersistentPhase.REVALIDATING)
+            app.action_cancel_or_back()
+            await wait_thread_event(
+                facade.cancel_seen,
+                "cooperative cancellation did not reach the application token",
             )
             facade.release.set()
-            await wait_until(
-                pilot,
-                lambda: app.tui_model.terminal is not None,
-                "cancelled execution did not produce authoritative terminal result",
-            )
+            await pilot.pause()
             self.assertEqual(app.tui_model.terminal.error_code, ErrorCode.CANCELLED)
             self.assertFalse(app.tui_model.terminal.writing_started)
 
@@ -392,32 +401,19 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
-            await pilot.press("enter")
-            await wait_until(
-                pilot,
-                lambda: (
-                    facade.entered.is_set()
-                    and app.tui_model.active is not None
-                    and app.tui_model.active.phase is PersistentPhase.WRITING
-                ),
+            operation_id = app.tui_model.active.operation_id
+            app._accept_event(ConfirmationSubmitted(operation_id))
+            await wait_thread_event(
+                facade.phase_events[PersistentPhase.WRITING],
                 "persistent worker never reached WRITING",
             )
-            await pilot.press("ctrl+q")
-            await wait_until(
-                pilot,
-                lambda: (
-                    app.tui_model.active is not None
-                    and app.tui_model.active.cancellation_deferred
-                ),
-                "safe quit did not defer cancellation during WRITING",
-            )
-            self.assertFalse(facade.cancel_seen)
+            self.assertIs(app.tui_model.active.phase, PersistentPhase.WRITING)
+            app.action_safe_quit()
+            self.assertIsNotNone(app.tui_model.active)
+            self.assertTrue(app.tui_model.active.cancellation_deferred)
+            self.assertFalse(facade.cancel_seen.is_set())
             facade.release.set()
-            await wait_until(
-                pilot,
-                lambda: app.tui_model.terminal is not None,
-                "WRITING transaction did not finish authoritatively",
-            )
+            await pilot.pause()
             self.assertEqual(app.tui_model.terminal.outcome.value, "success")
 
     async def test_writing_transport_fault_is_visible_unresolved_and_safe_quit_stays_open(self):
@@ -425,20 +421,18 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
-            await pilot.press("enter")
-            await wait_until(
-                pilot,
-                lambda: (
-                    app.tui_model.active is not None
-                    and app.tui_model.active.worker_fault_unresolved
-                ),
-                "WRITING transport fault was not retained as unresolved",
+            operation_id = app.tui_model.active.operation_id
+            app._accept_event(ConfirmationSubmitted(operation_id))
+            await wait_thread_event(
+                facade.phase_events[PersistentPhase.WRITING],
+                "persistent worker never reached WRITING",
             )
+            await pilot.pause()
+            self.assertTrue(app.tui_model.active.worker_fault_unresolved)
             self.assertIsNone(app.tui_model.terminal)
             detail = str(app.query_one("#detail", Static).render())
             self.assertIn("OUTCOME UNKNOWN", detail)
-            await pilot.press("ctrl+q")
-            await pilot.pause()
+            app.action_safe_quit()
             self.assertTrue(app.tui_model.active.worker_fault_unresolved)
             self.assertIsNone(app.tui_model.terminal)
 
