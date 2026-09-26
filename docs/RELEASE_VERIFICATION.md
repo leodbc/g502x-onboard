@@ -49,8 +49,11 @@ digests and package sets, SPDX dependency scope, canonical ZIP layout, checksum
 sidecar when present, path safety, and the assertion that private state is
 absent.
 
-The verifier continues to accept the historical v1 manifest format used by
-v0.1.0; this compatibility does not modify the immutable v0.1.0 release.
+The verifier continues to accept the historical v1 manifest format only for
+the immutable v0.1.0 contract: version 0.1.0, its recorded source commit,
+historical CLI entry point/dependency shape, and canonical archive root. A
+current or future artifact cannot select v1 as a weaker fallback path. This
+compatibility does not modify the immutable v0.1.0 release.
 
 ## Extracted-artifact smoke
 

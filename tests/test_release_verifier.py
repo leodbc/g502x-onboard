@@ -14,7 +14,14 @@ TOOLS = ROOT / "tools"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
-from verify_release import verify_archive, verify_directory
+from verify_release import (
+    HISTORICAL_V1_ENTRYPOINT,
+    HISTORICAL_V1_RELEASE_NAME,
+    HISTORICAL_V1_SOURCE_COMMIT,
+    HISTORICAL_V1_VERSION,
+    verify_archive,
+    verify_directory,
+)
 
 
 def _sha(data: bytes) -> str:
@@ -23,11 +30,23 @@ def _sha(data: bytes) -> str:
 
 def _fixture(root: Path) -> None:
     payload = b"payload\n"
+    root_id = "SPDXRef-Package-g502x-onboard"
     sbom = {
         "spdxVersion": "SPDX-2.3",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": HISTORICAL_V1_RELEASE_NAME,
         "documentNamespace": (
-            "https://spdx.org/spdxdocs/test-" + "a" * 40
+            "https://spdx.org/spdxdocs/g502x-onboard-"
+            + HISTORICAL_V1_SOURCE_COMMIT
         ),
+        "documentDescribes": [root_id],
+        "packages": [
+            {
+                "SPDXID": root_id,
+                "name": "g502x-onboard",
+                "versionInfo": HISTORICAL_V1_VERSION,
+            }
+        ],
     }
     sbom_bytes = (
         json.dumps(sbom, sort_keys=True).encode("utf-8") + b"\n"
@@ -36,7 +55,10 @@ def _fixture(root: Path) -> None:
     (root / "SBOM.spdx.json").write_bytes(sbom_bytes)
     manifest = {
         "format": "g502x-release-v1",
-        "source_commit": "a" * 40,
+        "version": HISTORICAL_V1_VERSION,
+        "source_commit": HISTORICAL_V1_SOURCE_COMMIT,
+        "source_inputs_clean": True,
+        "entrypoint": HISTORICAL_V1_ENTRYPOINT,
         "private_state_included": False,
         "archive_reproducible": True,
         "archive_layout": {
@@ -75,7 +97,7 @@ def _canonical_zip(root: Path, archive: Path) -> None:
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
         for path in sorted(root.iterdir()):
             info = zipfile.ZipInfo(
-                filename=f"release/{path.name}",
+                filename=f"{HISTORICAL_V1_RELEASE_NAME}/{path.name}",
                 date_time=(1980, 1, 1, 0, 0, 0),
             )
             info.create_system = 3
@@ -91,6 +113,36 @@ class ReleaseVerifierTests(unittest.TestCase):
             root.mkdir()
             _fixture(root)
             verify_directory(root)
+
+    def test_historical_v1_wrong_version_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "release"
+            root.mkdir()
+            _fixture(root)
+            manifest_path = root / "RELEASE_MANIFEST.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["version"] = "0.2.0"
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "historical v1 manifest version"):
+                verify_directory(root)
+
+    def test_historical_v1_wrong_source_identity_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "release"
+            root.mkdir()
+            _fixture(root)
+            manifest_path = root / "RELEASE_MANIFEST.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["source_commit"] = "b" * 40
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "historical v1 manifest source_commit"):
+                verify_directory(root)
 
     def test_directory_rejects_extra_file(self):
         with tempfile.TemporaryDirectory() as td:

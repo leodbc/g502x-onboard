@@ -16,7 +16,11 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from build_release import deterministic_zip
-from release_metadata import build_spdx, parse_requirements_lock
+from release_metadata import (
+    build_spdx,
+    canonicalize_package_name,
+    parse_requirements_lock,
+)
 from libs.utils import WINDOWS_HIDAPI_SHA256
 
 
@@ -24,6 +28,19 @@ class ReleaseMetadataLockTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.lock_text = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        cls.tui_lock_text = (ROOT / "requirements-tui.txt").read_text(
+            encoding="utf-8"
+        )
+
+    @staticmethod
+    def _lock(*pins: str) -> str:
+        digest = "a" * 64
+        rows = ["--require-hashes"]
+        rows.extend(
+            f"{pin} --hash=sha256:{digest}"
+            for pin in pins
+        )
+        return "\n".join(rows) + "\n"
 
     def test_current_lock_is_accepted(self):
         packages = parse_requirements_lock(self.lock_text)
@@ -62,6 +79,73 @@ class ReleaseMetadataLockTests(unittest.TestCase):
     def test_empty_lock_fails_closed(self):
         with self.assertRaises(ValueError):
             parse_requirements_lock("--require-hashes\n")
+
+    def test_current_optional_lock_is_accepted(self):
+        packages = parse_requirements_lock(self.tui_lock_text)
+        self.assertIn("textual", packages)
+        self.assertIn("typing-extensions", packages)
+
+    def test_package_name_canonicalization_matches_pypa_identity(self):
+        self.assertEqual(canonicalize_package_name("Foo_Bar"), "foo-bar")
+        self.assertEqual(canonicalize_package_name("foo.bar"), "foo-bar")
+        self.assertEqual(canonicalize_package_name("foo---bar"), "foo-bar")
+
+    def test_underscore_hyphen_collision_fails_closed(self):
+        lock = self._lock("foo_bar==1.0", "foo-bar==1.0")
+        with self.assertRaisesRegex(ValueError, "canonical package name collision"):
+            parse_requirements_lock(lock)
+
+    def test_dot_hyphen_collision_fails_closed(self):
+        lock = self._lock("foo.bar==1.0", "foo-bar==1.0")
+        with self.assertRaisesRegex(ValueError, "canonical package name collision"):
+            parse_requirements_lock(lock)
+
+    def test_canonical_collision_with_conflicting_versions_fails_closed(self):
+        lock = self._lock("foo_bar==1.0", "foo-bar==2.0")
+        with self.assertRaisesRegex(ValueError, "canonical package name collision"):
+            parse_requirements_lock(lock)
+
+    def test_core_optional_canonical_overlap_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "both core and optional"):
+            build_spdx(
+                version="0.2.0",
+                source_commit="a" * 40,
+                source_timestamp="2026-09-22T00:00:00+00:00",
+                requirements_text=self._lock("foo_bar==1.0"),
+                optional_requirements_text=self._lock("foo-bar==1.0"),
+                hidapi_files={},
+            )
+
+    def test_environment_marker_fails_closed(self):
+        digest = "a" * 64
+        lock = (
+            "--require-hashes\n"
+            f'foo==1.0 ; python_version >= "3.12" --hash=sha256:{digest}\n'
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported trailing syntax"):
+            parse_requirements_lock(lock)
+
+    def test_requirement_extra_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "invalid dependency name"):
+            parse_requirements_lock(self._lock("foo[bar]==1.0"))
+
+    def test_unknown_global_option_fails_closed(self):
+        lock = (
+            "--require-hashes\n"
+            "--extra-index-url https://example.invalid/simple\n"
+            + self._lock("foo==1.0").split("\n", 1)[1]
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported requirements option"):
+            parse_requirements_lock(lock)
+
+    def test_unexpected_requirement_token_fails_closed(self):
+        digest = "a" * 64
+        lock = (
+            "--require-hashes\n"
+            f"foo==1.0 --hash=sha256:{digest} --only-binary=:all:\n"
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported trailing syntax"):
+            parse_requirements_lock(lock)
 
 
     def test_runtime_pins_actual_dlls_and_sbom_agrees(self):
