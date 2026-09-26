@@ -302,13 +302,19 @@ class G502XTuiApp(App[None]):
                 # is still draining. State already captured the acknowledgement.
                 return
 
+    def _new_operation_id(self) -> OperationId:
+        # Treat the injected factory as a source of opaque display tokens only.
+        # A fresh process-local issuance prevents a reused factory object from
+        # aliasing a delayed callback or cancellation from an older operation.
+        return OperationId(str(self._operation_id_factory()))
+
     def action_probe(self) -> None:
         self._request_operation(OperationAction.PROBE)
 
     def action_refresh(self) -> None:
         if self._layout_constrained():
             return
-        self._accept_event(RefreshRequested(self._operation_id_factory()))
+        self._accept_event(RefreshRequested(self._new_operation_id()))
 
     def action_validate(self) -> None:
         self._request_operation(OperationAction.VALIDATE)
@@ -406,7 +412,7 @@ class G502XTuiApp(App[None]):
             return
         self._accept_event(
             OperationRequested(
-                self._operation_id_factory(),
+                self._new_operation_id(),
                 action,
                 hardware_affecting=hardware_affecting,
                 persistent_kind=persistent_kind,

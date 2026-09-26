@@ -22,6 +22,7 @@ from g502x_onboard.application.models import (
     WriteEligibility,
 )
 from g502x_onboard.tui.events import ConfirmationSubmitted
+from g502x_onboard.tui.model import OperationId
 
 try:
     from textual import events as textual_events
@@ -213,6 +214,21 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         bindings = {binding.key: binding for binding in G502XTuiApp.BINDINGS}
         self.assertTrue(bindings["escape"].priority)
         self.assertTrue(bindings["ctrl+q"].priority)
+
+    async def test_reused_factory_object_is_reissued_with_distinct_internal_identity(self):
+        facade = HarnessFacade()
+        fixed = OperationId("op-deadbeef")
+        app = G502XTuiApp(
+            facade=facade,
+            operation_id_factory=lambda: fixed,
+        )
+
+        first = app._new_operation_id()
+        second = app._new_operation_id()
+        self.assertEqual(str(first), "op-deadbeef")
+        self.assertEqual(str(second), "op-deadbeef")
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first.issuance, second.issuance)
 
     async def test_mount_80x24_exposes_semantic_safety_labels(self):
         facade = HarnessFacade()
