@@ -54,7 +54,7 @@ jobs:
           python -c "import struct; actual=struct.calcsize('P')*8; expected=int('${{ matrix.pointer_bits }}'); assert actual == expected, (actual, expected); print(f'Python pointer width: {actual}-bit')"
       - name: Syntax and offline tests
         run: |
-          python -m py_compile g502x.py g502x_onboard/__init__.py g502x_onboard/baseline.py g502x_onboard/constants.py g502x_onboard/config.py g502x_onboard/codec.py g502x_onboard/storage.py g502x_onboard/private_io.py g502x_onboard/device.py g502x_onboard/validator.py g502x_onboard/cli.py tools/release_smoke.py tools/release_metadata.py tools/build_release.py tools/verify_release.py
+          python -m py_compile g502x.py g502x_tui.py g502x_onboard/__init__.py g502x_onboard/baseline.py g502x_onboard/constants.py g502x_onboard/config.py g502x_onboard/codec.py g502x_onboard/storage.py g502x_onboard/private_io.py g502x_onboard/device.py g502x_onboard/validator.py g502x_onboard/cli.py g502x_onboard/tui/__init__.py g502x_onboard/tui/model.py g502x_onboard/tui/events.py g502x_onboard/tui/effects.py g502x_onboard/tui/update.py g502x_onboard/tui/view.py g502x_onboard/tui/runner.py g502x_onboard/tui/bootstrap.py tools/release_smoke.py tools/release_metadata.py tools/build_release.py tools/verify_release.py
           python -m json.tool g502x_onboard/config.schema.json
           python -m json.tool examples/basic.json
           python -m json.tool tests/fixtures/hardware-smoke.json
@@ -62,6 +62,7 @@ jobs:
           python g502x.py selftest
           python g502x.py --version
           python g502x.py capabilities --json
+          python g502x_tui.py --help
           python tools/release_smoke.py --help
 
       - name: Build public release metadata/archive
@@ -84,6 +85,27 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  tui-adapter:
+    name: tui-adapter
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+      - name: Install core hash lock
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Install locked optional TUI dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-tui.txt
+      - name: Compile Textual adapter
+        run: >-
+          python -m py_compile g502x_tui.py g502x_onboard/tui/app.py g502x_onboard/tui/bootstrap.py g502x_onboard/tui/runner.py
+      - name: Textual adapter harness and architecture tests
+        run: python -m unittest discover -s tests -p "test_tui*.py" -v
 
   reproducibility:
     name: cross-platform-release-reproducibility
