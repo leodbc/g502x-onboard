@@ -295,7 +295,12 @@ class G502XTuiApp(App[None]):
                     active.operation_id, self._model.confirmation_input
                 )
             )
-            self.query_one("#persistent-confirm", Input).focus()
+            try:
+                self.query_one("#persistent-confirm", Input).focus()
+            except NoMatches:
+                # The screen may be tearing down while a queued widget message
+                # is still draining. State already captured the acknowledgement.
+                return
 
     def action_probe(self) -> None:
         self._request_operation(OperationAction.PROBE)
