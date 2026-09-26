@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from threading import Event
 import unittest
@@ -168,11 +169,14 @@ class HarnessFacade:
         return OperationResult(ok=True, value=value, privacy=value.privacy)
 
 
-async def wait_until(pilot, predicate, message: str, limit: int = 60) -> None:
+async def wait_until(pilot, predicate, message: str, limit: int = 500) -> None:
     for _ in range(limit):
         if predicate():
             return
-        await pilot.pause(0.01)
+        # Yield directly to the Textual event loop. pilot.pause() also waits for
+        # CPU-idle semantics, which is inappropriate while a thread worker is
+        # deliberately active and made the harness timing-dependent.
+        await asyncio.sleep(0.01)
     raise AssertionError(message)
 
 
