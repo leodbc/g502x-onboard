@@ -21,6 +21,7 @@ from g502x_onboard.application.models import (
     StatusSnapshot,
     WriteEligibility,
 )
+from g502x_onboard.tui.events import ConfirmationSubmitted
 
 try:
     from textual import events as textual_events
