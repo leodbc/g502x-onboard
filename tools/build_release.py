@@ -116,16 +116,25 @@ def assert_canonical_generated_newlines(root: Path) -> None:
             )
 
 
-def deterministic_zip(root: Path, archive: Path) -> None:
+def deterministic_zip(
+    root: Path,
+    archive: Path,
+    *,
+    root_name: str | None = None,
+) -> None:
     if archive.exists():
         archive.unlink()
     files = sorted(
         (path for path in root.rglob("*") if path.is_file()),
         key=lambda path: path.relative_to(root).as_posix(),
     )
+    archive_root = root.name if root_name is None else root_name
+    if not archive_root or Path(archive_root).name != archive_root:
+        raise RuntimeError(f"invalid release archive root: {archive_root!r}")
+
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
         for path in files:
-            arcname = (Path(root.name) / path.relative_to(root)).as_posix()
+            arcname = (Path(archive_root) / path.relative_to(root)).as_posix()
             info = zipfile.ZipInfo(
                 filename=arcname,
                 date_time=(1980, 1, 1, 0, 0, 0),
@@ -254,7 +263,7 @@ def build(out: Path, expected_tag: str | None = None) -> tuple[Path, Path]:
     assert_canonical_generated_newlines(out)
 
     archive = out.parent / f"{out.name}.zip"
-    deterministic_zip(out, archive)
+    deterministic_zip(out, archive, root_name=f"{PROJECT_NAME}-{version}")
     checksum = archive.with_suffix(archive.suffix + ".sha256")
     checksum.write_bytes(
         f"{sha256_file(archive)}  {archive.name}\n".encode("ascii")

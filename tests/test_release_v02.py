@@ -202,32 +202,38 @@ class ReleaseV02IntegrationTests(unittest.TestCase):
     def test_spdx_missing_vendored_hidapi_package_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = self._copy_release(Path(td))
-            self._mutate_sbom(
-                root,
-                lambda sbom: sbom.__setitem__(
-                    "packages",
-                    [
-                        row for row in sbom["packages"]
-                        if row.get("SPDXID") != "SPDXRef-Package-vendored-hidapi"
-                    ],
-                ),
-            )
+            def mutate(sbom):
+                removed = "SPDXRef-Package-vendored-hidapi"
+                sbom["packages"] = [
+                    row for row in sbom["packages"]
+                    if row.get("SPDXID") != removed
+                ]
+                sbom["relationships"] = [
+                    row for row in sbom["relationships"]
+                    if row.get("spdxElementId") != removed
+                    and row.get("relatedSpdxElement") != removed
+                ]
+
+            self._mutate_sbom(root, mutate)
             with self.assertRaisesRegex(RuntimeError, "vendored hidapi package"):
                 verify_directory(root)
 
     def test_spdx_missing_vendored_dll_record_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = self._copy_release(Path(td))
-            self._mutate_sbom(
-                root,
-                lambda sbom: sbom.__setitem__(
-                    "files",
-                    [
-                        row for row in sbom["files"]
-                        if row.get("SPDXID") != "SPDXRef-File-hidapi-x64"
-                    ],
-                ),
-            )
+            def mutate(sbom):
+                removed = "SPDXRef-File-hidapi-x64"
+                sbom["files"] = [
+                    row for row in sbom["files"]
+                    if row.get("SPDXID") != removed
+                ]
+                sbom["relationships"] = [
+                    row for row in sbom["relationships"]
+                    if row.get("spdxElementId") != removed
+                    and row.get("relatedSpdxElement") != removed
+                ]
+
+            self._mutate_sbom(root, mutate)
             with self.assertRaisesRegex(RuntimeError, "file record mismatch"):
                 verify_directory(root)
 
@@ -327,6 +333,19 @@ class ReleaseV02IntegrationTests(unittest.TestCase):
             deterministic_zip(wrong_root, archive)
             with self.assertRaisesRegex(RuntimeError, "ZIP root"):
                 verify_archive(archive)
+
+    def test_custom_output_directory_keeps_canonical_archive_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root, archive = build(base / "ci-release")
+            self.assertEqual(root.name, "ci-release")
+            with zipfile.ZipFile(archive, "r") as zf:
+                roots = {
+                    name.split("/", 1)[0]
+                    for name in zf.namelist()
+                }
+            self.assertEqual(roots, {"g502x-onboard-0.2.0"})
+            verify_archive(archive)
 
     def test_wrong_release_tag_is_rejected_before_build(self):
         with tempfile.TemporaryDirectory() as td:

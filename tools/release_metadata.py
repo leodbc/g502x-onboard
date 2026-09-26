@@ -77,16 +77,21 @@ def parse_requirements_lock(text: str) -> dict[str, str]:
 
         hashes: list[str] = []
         for token in parts[1:]:
-            if token.startswith("--hash=") and not token.startswith("--hash=sha256:"):
+            if token.startswith("--hash=sha256:"):
+                match = SHA256_TOKEN_RE.fullmatch(token)
+                if match is None:
+                    raise ValueError(
+                        f"requirement pin has an invalid sha256 hash: {line}"
+                    )
+                hashes.append(match.group(1))
+                continue
+            if token.startswith("--hash="):
                 raise ValueError(
                     f"requirement pin uses unsupported hash algorithm: {line}"
                 )
-            match = SHA256_TOKEN_RE.fullmatch(token)
-            if match is None:
-                raise ValueError(
-                    f"requirement pin has unsupported trailing syntax: {line}"
-                )
-            hashes.append(match.group(1))
+            raise ValueError(
+                f"requirement pin has unsupported trailing syntax: {line}"
+            )
 
         if not hashes:
             raise ValueError(
