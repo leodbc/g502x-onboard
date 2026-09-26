@@ -256,6 +256,39 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facade.calls, [])
             self.assertIsNone(app.tui_model.active)
 
+    async def test_privacy_downgrade_clears_hidden_sensitive_widget_values(self):
+        facade = HarnessFacade()
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await focus_id(pilot, app, "config-path")
+            await pilot.press("s", "e", "c", "r", "e", "t")
+            await focus_id(pilot, app, "backup-path")
+            await pilot.press("b", "a", "c", "k", "u", "p")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.query_one("#config-path", Input).value == "secret"
+                    and app.query_one("#backup-path", Input).value == "backup"
+                ),
+                "sensitive widget inputs did not populate",
+            )
+
+            await pilot.resize_terminal(79, 23)
+            await pilot.pause()
+            self.assertTrue(app.query_one("#constrained", Static).display)
+
+            # LOCAL_SENSITIVE -> PRIVATE_DIAGNOSTIC -> SHAREABLE.
+            app.action_privacy()
+            app.action_privacy()
+            await pilot.pause()
+
+            self.assertIs(app.tui_model.surface_privacy, PrivacyClass.SHAREABLE)
+            self.assertEqual(app.tui_model.config_path_input, "")
+            self.assertEqual(app.tui_model.backup_path_input, "")
+            self.assertEqual(app.query_one("#config-path", Input).value, "")
+            self.assertEqual(app.query_one("#backup-path", Input).value, "")
+            self.assertIsNone(app.tui_model.disclosure)
+
     async def test_idle_navigation_help_focus_resize_do_not_poll_then_refresh_once(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)

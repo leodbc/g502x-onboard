@@ -485,9 +485,10 @@ class G502XTuiApp(App[None]):
             return
         constrained_widget.display = constrained
         main_widget.display = not constrained
-        if constrained:
-            return
 
+        # Hidden widgets still mirror the privacy-filtered model. In particular,
+        # a downgrade to SHAREABLE must erase local/private values immediately
+        # even while the main layout is hidden by the minimum-size guard.
         vm = view(self._model)
         summary = [
             f"Privacy: {vm.privacy_label}",
