@@ -428,6 +428,13 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("READ ONLY", detail)
             self.assertIn("Read-only reason", detail)
 
+            calls_before_shortcuts = list(facade.calls)
+            app.set_focus(None)
+            await pilot.press("l", "s", "a", "b")
+            await pilot.pause()
+            self.assertEqual(facade.calls, calls_before_shortcuts)
+            self.assertIsNone(app.tui_model.active)
+
     async def test_no_color_keeps_semantics_in_text(self):
         facade = HarnessFacade(read_only=True)
         with patch.dict(os.environ, {"NO_COLOR": "1"}):

@@ -410,6 +410,11 @@ class G502XTuiApp(App[None]):
     ) -> None:
         if self._layout_constrained():
             return
+        if self._model.read_only and (
+            action is OperationAction.PROFILE_SWITCH
+            or action is OperationAction.PREPARE_PERSISTENT
+        ):
+            return
         self._accept_event(
             OperationRequested(
                 self._new_operation_id(),
