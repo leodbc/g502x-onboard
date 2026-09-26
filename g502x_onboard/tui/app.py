@@ -20,6 +20,7 @@ from .events import (
     ConfirmationChanged,
     ConfirmationSubmitted,
     EnterReview,
+    Navigate,
     OperationRequested,
     ProfileConfirmationChanged,
     ProfileTargetChanged,
@@ -406,6 +407,25 @@ class G502XTuiApp(App[None]):
 
     def _accept_event(self, event: object) -> None:
         self._model, effects = update(self._model, event)
+        active = self._model.active
+        if (
+            active is not None
+            and active.persistent_kind is not None
+            and not active.execution_requested
+            and active.cancellation_acknowledged
+            and self._model.prepared is not None
+        ):
+            # Preserve the Phase 4 acknowledgement semantics, then abandon the
+            # pre-execution preparation through ordinary model transitions.
+            # No Textual worker/thread cancellation is used as hardware authority.
+            self._model, _ = update(
+                self._model,
+                ChangePrivacySurface(PrivacyClass.SHAREABLE),
+            )
+            self._model, _ = update(
+                self._model,
+                Navigate(Route.HOME),
+            )
         self._render()
         for effect in effects:
             self._dispatch_effect(effect)
@@ -424,7 +444,8 @@ class G502XTuiApp(App[None]):
     def _render(self) -> None:
         if not self.is_mounted:
             return
-        width, height = self.size
+        width = self.size.width
+        height = self.size.height
         constrained = width < self.MINIMUM_SIZE[0] or height < self.MINIMUM_SIZE[1]
         self.query_one("#constrained", Static).display = constrained
         self.query_one("#main", Vertical).display = not constrained
@@ -534,6 +555,12 @@ class G502XTuiApp(App[None]):
                 )
             if vm.terminal_label:
                 detail.append(f"Terminal: {vm.terminal_label}")
+                detail.append(
+                    "Authoritative facts: "
+                    f"writing_started={str(vm.writing_started).lower()}; "
+                    f"reconciliation_completed={str(vm.reconciliation_completed).lower()}; "
+                    f"post_validation_completed={str(vm.post_validation_completed).lower()}"
+                )
             if vm.error_code:
                 detail.append(f"Error code: {vm.error_code.value}")
             if vm.message:

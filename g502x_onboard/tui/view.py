@@ -48,6 +48,9 @@ class ViewModel:
     worker_fault_unresolved: bool
     safety_label: str | None
     terminal_outcome: TerminalOutcome | None
+    writing_started: bool
+    reconciliation_completed: bool
+    post_validation_completed: bool
     terminal_label: str | None
     error_code: ErrorCode | None
     message: str | None
@@ -255,6 +258,15 @@ def view(model: TuiModel) -> ViewModel:
         worker_fault_unresolved=worker_fault_unresolved,
         safety_label=safety_label,
         terminal_outcome=terminal_outcome,
+        writing_started=(
+            model.terminal.writing_started if model.terminal is not None else False
+        ),
+        reconciliation_completed=(
+            model.terminal.reconciliation_completed if model.terminal is not None else False
+        ),
+        post_validation_completed=(
+            model.terminal.post_validation_completed if model.terminal is not None else False
+        ),
         terminal_label=terminal_label,
         error_code=error_code,
         message=message,
