@@ -347,13 +347,20 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
-            await pilot.press("enter")
-            await wait_until(
-                pilot,
-                lambda: app.tui_model.terminal is not None,
-                "persistent success did not reach terminal state",
+
+            # Keep the submit itself as a real keyboard Enter. Run it as a task
+            # so the test can observe the synchronous facade worker phases
+            # without requiring Pilot.press() to become the worker scheduler.
+            submit = asyncio.create_task(pilot.press("enter"))
+            await wait_thread_event(
+                facade.phase_events[PersistentPhase.POST_VALIDATING],
+                "keyboard Enter did not drive the operation through post-validation",
             )
+            await submit
+            await pilot.pause()
+
             self.assertEqual(facade.execute_calls, 1)
+            self.assertIsNotNone(app.tui_model.terminal)
             self.assertEqual(app.tui_model.terminal.outcome.value, "success")
             detail = str(app.query_one("#detail", Static).render())
             self.assertIn("Terminal: SUCCESS", detail)
