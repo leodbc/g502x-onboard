@@ -372,8 +372,11 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             )
 
             await pilot.resize_terminal(79, 23)
-            await pilot.pause()
-            self.assertTrue(app.query_one("#constrained", Static).display)
+            await wait_until(
+                pilot,
+                lambda: app.query_one("#constrained", Static).display,
+                "constrained layout did not settle after resize",
+            )
 
             # LOCAL_SENSITIVE -> PRIVATE_DIAGNOSTIC -> SHAREABLE.
             app.action_privacy()
