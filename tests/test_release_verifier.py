@@ -16,9 +16,11 @@ if str(TOOLS) not in sys.path:
 
 from verify_release import (
     HISTORICAL_V1_ENTRYPOINT,
+    HISTORICAL_V1_MANIFEST_SHA256,
     HISTORICAL_V1_RELEASE_NAME,
     HISTORICAL_V1_SOURCE_COMMIT,
     HISTORICAL_V1_VERSION,
+    _verify_historical_v1_manifest_digest,
     verify_archive,
     verify_directory,
 )
@@ -107,12 +109,53 @@ def _canonical_zip(root: Path, archive: Path) -> None:
 
 
 class ReleaseVerifierTests(unittest.TestCase):
-    def test_directory_accepts_exact_manifest(self):
+    def test_published_historical_manifest_digest_contract_is_accepted(self):
+        _verify_historical_v1_manifest_digest(
+            HISTORICAL_V1_MANIFEST_SHA256
+        )
+
+    def test_published_historical_manifest_digest_mutation_is_rejected(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "historical v1 manifest content digest",
+        ):
+            _verify_historical_v1_manifest_digest("0" * 64)
+
+    def test_self_consistent_historical_looking_payload_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "release"
             root.mkdir()
             _fixture(root)
-            verify_directory(root)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "historical v1 manifest content digest",
+            ):
+                verify_directory(root)
+
+    def test_single_file_mutation_with_recalculated_metadata_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "release"
+            root.mkdir()
+            _fixture(root)
+
+            payload = b"payload-mutated\n"
+            (root / "payload.txt").write_bytes(payload)
+            manifest_path = root / "RELEASE_MANIFEST.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["files"]["payload.txt"] = {
+                "sha256": _sha(payload),
+                "bytes": len(payload),
+            }
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "historical v1 manifest content digest",
+            ):
+                verify_directory(root)
 
     def test_historical_v1_wrong_version_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
@@ -198,7 +241,7 @@ class ReleaseVerifierTests(unittest.TestCase):
             ):
                 verify_archive(archive)
 
-    def test_archive_and_checksum_sidecar(self):
+    def test_archive_checksum_sidecar_precedes_historical_content_gate(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             root = base / "release"
@@ -211,7 +254,11 @@ class ReleaseVerifierTests(unittest.TestCase):
                 f"{digest}  {archive.name}\n",
                 encoding="ascii",
             )
-            verify_archive(archive)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "historical v1 manifest content digest",
+            ):
+                verify_archive(archive)
 
             archive.with_suffix(".zip.sha256").write_text(
                 f"{'0' * 64}  {archive.name}\n",
