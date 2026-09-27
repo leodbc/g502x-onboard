@@ -33,6 +33,11 @@ HISTORICAL_V1_SOURCE_COMMIT = "bf3d4458176b0c8326888158d08d3332c1429737"
 HISTORICAL_V1_RELEASE_NAME = "g502x-onboard-0.1.0"
 HISTORICAL_V1_ENTRYPOINT = "g502x.py"
 HISTORICAL_V1_PACKAGES = {"hid": "1.0.9"}
+# Immutable GitHub Release asset digest for v0.1.0 RELEASE_MANIFEST.json.
+# Release asset 582484050, published from the tag-bound v0.1.0 release workflow.
+HISTORICAL_V1_MANIFEST_SHA256 = (
+    "79eaa918186b1b084331c2c66c5dd188d5d20eeb5a9db70b9e32dbf4e1659692"
+)
 REQUIRED_V2_FILES = {
     "g502x.py",
     "g502x_tui.py",
@@ -86,6 +91,18 @@ def _load_json_bytes(data: bytes, *, context: str) -> dict:
         raise RuntimeError(f"{context}: JSON root must be an object")
     return value
 
+
+
+def _verify_historical_v1_manifest_digest(digest: str) -> None:
+    if (
+        not isinstance(digest, str)
+        or digest.lower() != HISTORICAL_V1_MANIFEST_SHA256
+    ):
+        raise RuntimeError("historical v1 manifest content digest mismatch")
+
+
+def _verify_historical_v1_manifest_content(manifest_bytes: bytes) -> None:
+    _verify_historical_v1_manifest_digest(sha256_bytes(manifest_bytes))
 
 
 def _verify_historical_v1_contract(
@@ -305,7 +322,10 @@ def _verify_spdx_dependencies(
             raise RuntimeError("SBOM relationship fields invalid")
         if left not in all_ids or right not in all_ids:
             raise RuntimeError("SBOM relationship references unknown SPDXID")
-        relationship_set.add((left, relation, right))
+        triple = (left, relation, right)
+        if triple in relationship_set:
+            raise RuntimeError("SBOM duplicate relationship")
+        relationship_set.add(triple)
 
     root_id = "SPDXRef-Package-g502x-onboard"
     root = package_rows.get(root_id)
@@ -315,6 +335,8 @@ def _verify_spdx_dependencies(
         or root.get("versionInfo") != version
     ):
         raise RuntimeError("SBOM root package/version mismatch")
+    if sbom_json.get("documentDescribes") != [root_id]:
+        raise RuntimeError("SBOM documentDescribes mismatch")
 
     for name, dep_version in core_packages.items():
         dep_id = spdx_pypi_id(name)
@@ -382,9 +404,60 @@ def _verify_spdx_dependencies(
                 f"SBOM vendored hidapi containment relationship missing: {arch}"
             )
 
+    expected_package_ids = {root_id, hidapi_id}
+    expected_package_ids.update(
+        spdx_pypi_id(name) for name in core_packages
+    )
+    expected_package_ids.update(
+        spdx_pypi_id(name) for name in optional_packages
+    )
+    observed_package_ids = set(package_rows)
+    if observed_package_ids != expected_package_ids:
+        raise RuntimeError(
+            "SBOM package ID set mismatch; "
+            f"missing={sorted(expected_package_ids - observed_package_ids)} "
+            f"extra={sorted(observed_package_ids - expected_package_ids)}"
+        )
+
+    expected_file_ids = {
+        "SPDXRef-File-hidapi-x64",
+        "SPDXRef-File-hidapi-x86",
+    }
+    observed_file_ids = set(file_rows)
+    if observed_file_ids != expected_file_ids:
+        raise RuntimeError(
+            "SBOM file ID set mismatch; "
+            f"missing={sorted(expected_file_ids - observed_file_ids)} "
+            f"extra={sorted(observed_file_ids - expected_file_ids)}"
+        )
+
+    expected_relationships = {
+        (root_id, "DEPENDS_ON", spdx_pypi_id(name))
+        for name in core_packages
+    }
+    expected_relationships.update(
+        (spdx_pypi_id(name), "OPTIONAL_DEPENDENCY_OF", root_id)
+        for name in optional_packages
+    )
+    expected_relationships.update(
+        {
+            (root_id, "DEPENDS_ON", hidapi_id),
+            (hidapi_id, "CONTAINS", "SPDXRef-File-hidapi-x64"),
+            (hidapi_id, "CONTAINS", "SPDXRef-File-hidapi-x86"),
+        }
+    )
+    if relationship_set != expected_relationships:
+        raise RuntimeError(
+            "SBOM relationship set mismatch; "
+            f"missing={sorted(expected_relationships - relationship_set)} "
+            f"extra={sorted(relationship_set - expected_relationships)}"
+        )
+
+
 def _verify_payload(
     *,
     manifest: dict,
+    manifest_bytes: bytes,
     actual_files: set[str],
     read_bytes: Callable[[str], bytes],
 ) -> None:
@@ -456,6 +529,7 @@ def _verify_payload(
         core_packages, optional_packages, version = _verify_historical_v1_contract(
             manifest
         )
+        _verify_historical_v1_manifest_content(manifest_bytes)
     else:
         core_packages, optional_packages = _verify_v2_contract(
             manifest=manifest,
@@ -507,8 +581,9 @@ def verify_directory(root: str | Path) -> None:
     manifest_path = root / "RELEASE_MANIFEST.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise RuntimeError("RELEASE_MANIFEST.json must be a regular file")
+    manifest_bytes = manifest_path.read_bytes()
     manifest = _load_json_bytes(
-        manifest_path.read_bytes(),
+        manifest_bytes,
         context="release manifest",
     )
 
@@ -527,6 +602,7 @@ def verify_directory(root: str | Path) -> None:
 
     _verify_payload(
         manifest=manifest,
+        manifest_bytes=manifest_bytes,
         actual_files=set(files),
         read_bytes=lambda rel: files[rel].read_bytes(),
     )
@@ -644,8 +720,9 @@ def verify_archive(archive: str | Path) -> None:
             raise RuntimeError(
                 f"{root_name}/RELEASE_MANIFEST.json missing from ZIP"
             )
+        manifest_bytes = zf.read(manifest_info)
         manifest = _load_json_bytes(
-            zf.read(manifest_info),
+            manifest_bytes,
             context="release manifest",
         )
         fmt = manifest.get("format")
@@ -659,6 +736,7 @@ def verify_archive(archive: str | Path) -> None:
 
         _verify_payload(
             manifest=manifest,
+            manifest_bytes=manifest_bytes,
             actual_files=set(rows),
             read_bytes=lambda rel: zf.read(rows[rel]),
         )
