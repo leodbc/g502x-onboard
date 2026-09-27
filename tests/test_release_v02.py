@@ -318,6 +318,131 @@ class ReleaseV02IntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "canonical package-name collision"):
                 verify_directory(root)
 
+    def test_spdx_unexpected_package_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._copy_release(Path(td))
+
+            def mutate(sbom):
+                sbom["packages"].append(
+                    {
+                        "SPDXID": "SPDXRef-Package-unexpected",
+                        "name": "unexpected-package",
+                        "versionInfo": "1.0",
+                    }
+                )
+
+            self._mutate_sbom(root, mutate)
+            with self.assertRaisesRegex(RuntimeError, "package ID set mismatch"):
+                verify_directory(root)
+
+    def test_spdx_unexpected_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._copy_release(Path(td))
+
+            def mutate(sbom):
+                sbom["files"].append(
+                    {
+                        "SPDXID": "SPDXRef-File-unexpected",
+                        "fileName": "./docs/unexpected.txt",
+                        "checksums": [
+                            {
+                                "algorithm": "SHA256",
+                                "checksumValue": "0" * 64,
+                            }
+                        ],
+                    }
+                )
+
+            self._mutate_sbom(root, mutate)
+            with self.assertRaisesRegex(RuntimeError, "file ID set mismatch"):
+                verify_directory(root)
+
+    def test_spdx_unexpected_package_and_file_are_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._copy_release(Path(td))
+
+            def mutate(sbom):
+                sbom["packages"].append(
+                    {
+                        "SPDXID": "SPDXRef-Package-unexpected",
+                        "name": "unexpected-package",
+                        "versionInfo": "1.0",
+                    }
+                )
+                sbom["files"].append(
+                    {
+                        "SPDXID": "SPDXRef-File-unexpected",
+                        "fileName": "./docs/unexpected.txt",
+                        "checksums": [
+                            {
+                                "algorithm": "SHA256",
+                                "checksumValue": "0" * 64,
+                            }
+                        ],
+                    }
+                )
+
+            self._mutate_sbom(root, mutate)
+            with self.assertRaisesRegex(RuntimeError, "package ID set mismatch"):
+                verify_directory(root)
+
+    def test_spdx_duplicate_relationship_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._copy_release(Path(td))
+
+            def mutate(sbom):
+                sbom["relationships"].append(dict(sbom["relationships"][0]))
+
+            self._mutate_sbom(root, mutate)
+            with self.assertRaisesRegex(RuntimeError, "duplicate relationship"):
+                verify_directory(root)
+
+    def test_spdx_document_describes_must_be_exact_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._copy_release(Path(td))
+
+            def mutate(sbom):
+                root_id = "SPDXRef-Package-g502x-onboard"
+                sbom["documentDescribes"] = [root_id, root_id]
+
+            self._mutate_sbom(root, mutate)
+            with self.assertRaisesRegex(RuntimeError, "documentDescribes"):
+                verify_directory(root)
+
+    def test_spdx_unexpected_relationship_between_known_ids_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._copy_release(Path(td))
+
+            def mutate(sbom):
+                sbom["relationships"].append(
+                    {
+                        "spdxElementId": "SPDXRef-Package-g502x-onboard",
+                        "relationshipType": "CONTAINS",
+                        "relatedSpdxElement": "SPDXRef-File-hidapi-x64",
+                    }
+                )
+
+            self._mutate_sbom(root, mutate)
+            with self.assertRaisesRegex(RuntimeError, "relationship set mismatch"):
+                verify_directory(root)
+
+    def test_spdx_unknown_relationship_endpoint_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._copy_release(Path(td))
+
+            def mutate(sbom):
+                sbom["relationships"].append(
+                    {
+                        "spdxElementId": "SPDXRef-Package-g502x-onboard",
+                        "relationshipType": "DEPENDS_ON",
+                        "relatedSpdxElement": "SPDXRef-Package-does-not-exist",
+                    }
+                )
+
+            self._mutate_sbom(root, mutate)
+            with self.assertRaisesRegex(RuntimeError, "unknown SPDXID"):
+                verify_directory(root)
+
     def test_archive_rejects_reversed_physical_member_order(self):
         with tempfile.TemporaryDirectory() as td:
             archive = Path(td) / "reversed.zip"
