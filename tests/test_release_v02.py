@@ -71,6 +71,25 @@ class ReleaseV02IntegrationTests(unittest.TestCase):
         manifest["files"]["SBOM.spdx.json"]["bytes"] = len(sbom_bytes)
         self._write_manifest(root, manifest)
 
+    def _assert_sbom_mutation_rejected(
+        self,
+        mutate,
+        pattern: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = self._copy_release(Path(td))
+            self._mutate_sbom(root, mutate)
+            with self.assertRaisesRegex(RuntimeError, pattern):
+                verify_directory(root)
+
+    @staticmethod
+    def _spdx_row(sbom: dict, section: str, spdx_id: str) -> dict:
+        return next(
+            row
+            for row in sbom[section]
+            if row.get("SPDXID") == spdx_id
+        )
+
     @staticmethod
     def _write_reverse_order_zip(root: Path, archive: Path) -> None:
         files = sorted(
@@ -157,6 +176,294 @@ class ReleaseV02IntegrationTests(unittest.TestCase):
     def test_release_verifier_accepts_v2_directory_and_archive(self):
         verify_directory(self.root)
         verify_archive(self.archive)
+
+    def test_spdx_canonical_semantic_rows_are_verified(self):
+        self.assertEqual(self.sbom["spdxVersion"], "SPDX-2.3")
+        self.assertEqual(self.sbom["dataLicense"], "CC0-1.0")
+        self.assertEqual(self.sbom["SPDXID"], "SPDXRef-DOCUMENT")
+        self.assertEqual(self.sbom["name"], "g502x-onboard-0.2.0")
+        self.assertEqual(
+            self.sbom["documentNamespace"],
+            "https://spdx.org/spdxdocs/g502x-onboard-"
+            + self.manifest["source_commit"],
+        )
+        self.assertEqual(
+            self.sbom["creationInfo"]["creators"],
+            ["Tool: g502x-release-metadata"],
+        )
+        self.assertRegex(
+            self.sbom["creationInfo"]["created"],
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+        )
+
+        root = self._spdx_row(
+            self.sbom,
+            "packages",
+            "SPDXRef-Package-g502x-onboard",
+        )
+        self.assertEqual(root["downloadLocation"], "NOASSERTION")
+        self.assertIs(root["filesAnalyzed"], False)
+        self.assertEqual(root["licenseConcluded"], "GPL-3.0-only")
+        self.assertEqual(root["licenseDeclared"], "GPL-3.0-only")
+        self.assertEqual(root["copyrightText"], "NOASSERTION")
+
+        core = self._spdx_row(
+            self.sbom,
+            "packages",
+            "SPDXRef-Package-pypi-hid",
+        )
+        self.assertEqual(core["downloadLocation"], "https://pypi.org/project/hid/")
+        self.assertEqual(
+            core["externalRefs"][0]["referenceLocator"],
+            "pkg:pypi/hid@1.0.9",
+        )
+        self.assertEqual(core["licenseDeclared"], "MIT")
+        self.assertEqual(
+            core["comment"],
+            "Core runtime dependency from requirements.txt.",
+        )
+
+        optional = self._spdx_row(
+            self.sbom,
+            "packages",
+            "SPDXRef-Package-pypi-textual",
+        )
+        self.assertEqual(optional["downloadLocation"], "NOASSERTION")
+        self.assertEqual(optional["licenseDeclared"], "NOASSERTION")
+        self.assertIn("Optional Textual UI", optional["comment"])
+
+        vendored = self._spdx_row(
+            self.sbom,
+            "packages",
+            "SPDXRef-Package-vendored-hidapi",
+        )
+        self.assertEqual(vendored["versionInfo"], "0.15.0")
+        self.assertEqual(vendored["licenseDeclared"], "BSD-3-Clause")
+        self.assertEqual(vendored["licenseConcluded"], "BSD-3-Clause")
+
+        dll = self._spdx_row(
+            self.sbom,
+            "files",
+            "SPDXRef-File-hidapi-x64",
+        )
+        self.assertEqual(dll["licenseConcluded"], "BSD-3-Clause")
+        self.assertEqual(dll["licenseInfoInFiles"], ["BSD-3-Clause"])
+        self.assertEqual(dll["copyrightText"], "NOASSERTION")
+
+        verify_directory(self.root)
+
+    def test_spdx_document_semantic_mutations_are_rejected(self):
+        source_commit = self.manifest["source_commit"]
+        mutations = {
+            "dataLicense": lambda sbom: sbom.__setitem__("dataLicense", "MIT"),
+            "SPDXID": lambda sbom: sbom.__setitem__(
+                "SPDXID",
+                "SPDXRef-DOCUMENT-mutated",
+            ),
+            "name": lambda sbom: sbom.__setitem__(
+                "name",
+                "g502x-onboard-wrong",
+            ),
+            "namespace-prefix": lambda sbom: sbom.__setitem__(
+                "documentNamespace",
+                "https://example.invalid/spdx/" + source_commit,
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                self._assert_sbom_mutation_rejected(
+                    mutate,
+                    "SBOM document",
+                )
+
+    def test_spdx_creation_info_mutations_are_rejected(self):
+        created = self.sbom["creationInfo"]["created"]
+
+        def missing(sbom):
+            sbom.pop("creationInfo", None)
+
+        def wrong_creator(sbom):
+            sbom["creationInfo"]["creators"] = ["Tool: wrong-tool"]
+
+        def malformed_created(sbom):
+            sbom["creationInfo"]["created"] = "2026-13-40T25:61:61Z"
+
+        def noncanonical_created(sbom):
+            sbom["creationInfo"]["created"] = created[:-1] + "+00:00"
+
+        for label, mutate, pattern in (
+            ("missing", missing, "creationInfo missing"),
+            ("creator", wrong_creator, "creationInfo creators"),
+            ("malformed-created", malformed_created, "creationInfo created"),
+            ("noncanonical-created", noncanonical_created, "creationInfo created"),
+        ):
+            with self.subTest(label=label):
+                self._assert_sbom_mutation_rejected(mutate, pattern)
+
+    def test_spdx_root_package_semantic_mutations_are_rejected(self):
+        root_id = "SPDXRef-Package-g502x-onboard"
+
+        def set_field(field, value):
+            def mutate(sbom):
+                self._spdx_row(sbom, "packages", root_id)[field] = value
+            return mutate
+
+        def missing_copyright(sbom):
+            self._spdx_row(sbom, "packages", root_id).pop(
+                "copyrightText",
+                None,
+            )
+
+        for label, mutate in (
+            ("download", set_field("downloadLocation", "https://example.invalid/")),
+            ("filesAnalyzed", set_field("filesAnalyzed", True)),
+            ("licenseConcluded", set_field("licenseConcluded", "NOASSERTION")),
+            ("licenseDeclared", set_field("licenseDeclared", "NOASSERTION")),
+            ("copyrightText", missing_copyright),
+        ):
+            with self.subTest(label=label):
+                self._assert_sbom_mutation_rejected(
+                    mutate,
+                    "SBOM root package",
+                )
+
+    def test_spdx_core_dependency_semantic_mutations_are_rejected(self):
+        dep_id = "SPDXRef-Package-pypi-hid"
+
+        def set_field(field, value):
+            def mutate(sbom):
+                self._spdx_row(sbom, "packages", dep_id)[field] = value
+            return mutate
+
+        def wrong_purl(sbom):
+            row = self._spdx_row(sbom, "packages", dep_id)
+            row["externalRefs"][0]["referenceLocator"] = "pkg:pypi/hid@9.9.9"
+
+        for label, mutate in (
+            ("download", set_field("downloadLocation", "https://example.invalid/")),
+            ("purl", wrong_purl),
+            ("licenseDeclared", set_field("licenseDeclared", "NOASSERTION")),
+            (
+                "scope-comment",
+                set_field(
+                    "comment",
+                    "Optional Textual UI runtime dependency from requirements-tui.txt.",
+                ),
+            ),
+        ):
+            with self.subTest(label=label):
+                self._assert_sbom_mutation_rejected(
+                    mutate,
+                    "SBOM core dependency hid",
+                )
+
+    def test_spdx_optional_dependency_semantic_mutations_are_rejected(self):
+        dep_id = "SPDXRef-Package-pypi-textual"
+
+        def set_field(field, value):
+            def mutate(sbom):
+                self._spdx_row(sbom, "packages", dep_id)[field] = value
+            return mutate
+
+        def wrong_purl(sbom):
+            row = self._spdx_row(sbom, "packages", dep_id)
+            row["externalRefs"][0]["referenceLocator"] = (
+                "pkg:pypi/textual@0.0.0"
+            )
+
+        def missing_external_refs(sbom):
+            self._spdx_row(sbom, "packages", dep_id).pop(
+                "externalRefs",
+                None,
+            )
+
+        for label, mutate in (
+            ("purl", wrong_purl),
+            ("missing-externalRefs", missing_external_refs),
+            (
+                "scope-comment",
+                set_field(
+                    "comment",
+                    "Core runtime dependency from requirements.txt.",
+                ),
+            ),
+            (
+                "download",
+                set_field(
+                    "downloadLocation",
+                    "https://pypi.org/project/textual/",
+                ),
+            ),
+            ("licenseDeclared", set_field("licenseDeclared", "MIT")),
+        ):
+            with self.subTest(label=label):
+                self._assert_sbom_mutation_rejected(
+                    mutate,
+                    "SBOM optional TUI dependency textual",
+                )
+
+    def test_spdx_vendored_hidapi_semantic_mutations_are_rejected(self):
+        package_id = "SPDXRef-Package-vendored-hidapi"
+
+        def set_field(field, value):
+            def mutate(sbom):
+                self._spdx_row(sbom, "packages", package_id)[field] = value
+            return mutate
+
+        for label, mutate, pattern in (
+            (
+                "download",
+                set_field("downloadLocation", "https://example.invalid/hidapi"),
+                "SBOM vendored hidapi package",
+            ),
+            (
+                "version",
+                set_field("versionInfo", "0.14.0"),
+                "vendored hidapi package/version",
+            ),
+            (
+                "licenseConcluded",
+                set_field("licenseConcluded", "NOASSERTION"),
+                "SBOM vendored hidapi package",
+            ),
+            (
+                "licenseDeclared",
+                set_field("licenseDeclared", "NOASSERTION"),
+                "SBOM vendored hidapi package",
+            ),
+            (
+                "provenance-comment",
+                set_field("comment", "Unrelated provenance."),
+                "SBOM vendored hidapi package",
+            ),
+        ):
+            with self.subTest(label=label):
+                self._assert_sbom_mutation_rejected(mutate, pattern)
+
+    def test_spdx_vendored_dll_license_mutations_are_rejected(self):
+        file_id = "SPDXRef-File-hidapi-x64"
+
+        def set_field(field, value):
+            def mutate(sbom):
+                self._spdx_row(sbom, "files", file_id)[field] = value
+            return mutate
+
+        def missing_copyright(sbom):
+            self._spdx_row(sbom, "files", file_id).pop(
+                "copyrightText",
+                None,
+            )
+
+        for label, mutate in (
+            ("licenseConcluded", set_field("licenseConcluded", "NOASSERTION")),
+            ("licenseInfoInFiles", set_field("licenseInfoInFiles", ["NOASSERTION"])),
+            ("copyrightText", missing_copyright),
+        ):
+            with self.subTest(label=label):
+                self._assert_sbom_mutation_rejected(
+                    mutate,
+                    "SBOM vendored hidapi file x64",
+                )
 
     def test_archive_contains_tui_entrypoint_lock_and_release_notes(self):
         with zipfile.ZipFile(self.archive, "r") as zf:

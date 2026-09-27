@@ -13,8 +13,14 @@ from typing import Callable
 
 from release_metadata import (
     canonicalize_package_name,
+    normalize_git_timestamp,
     parse_requirements_lock,
+    spdx_dependency,
+    spdx_document_semantics,
+    spdx_hidapi_file,
     spdx_pypi_id,
+    spdx_root_package,
+    spdx_vendored_hidapi_package,
 )
 
 
@@ -22,6 +28,9 @@ SUPPORTED_FORMATS = {"g502x-release-v1", "g502x-release-v2"}
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 VERSION_RE = re.compile(r'^__version__\s*=\s*"([^"]+)"', re.MULTILINE)
+SPDX_CREATED_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+)
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 MAX_ENTRY_BYTES = 16 * 1024 * 1024
@@ -253,6 +262,70 @@ def _verify_v2_contract(
     )
 
 
+def _require_spdx_fields(
+    row: dict,
+    expected: dict,
+    *,
+    context: str,
+) -> None:
+    for key, expected_value in expected.items():
+        if key not in row:
+            raise RuntimeError(f"{context} {key} mismatch")
+        observed = row[key]
+        if isinstance(expected_value, bool):
+            matches = observed is expected_value
+        else:
+            matches = observed == expected_value
+        if not matches:
+            raise RuntimeError(f"{context} {key} mismatch")
+
+
+def _verify_spdx_document(
+    *,
+    sbom_json: dict,
+    version: str,
+    source_commit: str,
+) -> None:
+    expected = spdx_document_semantics(
+        version=version,
+        source_commit=source_commit,
+    )
+    static_fields = {
+        key: expected[key]
+        for key in (
+            "spdxVersion",
+            "dataLicense",
+            "SPDXID",
+            "name",
+            "documentNamespace",
+            "documentDescribes",
+        )
+    }
+    _require_spdx_fields(
+        sbom_json,
+        static_fields,
+        context="SBOM document",
+    )
+
+    creation_info = sbom_json.get("creationInfo")
+    if not isinstance(creation_info, dict):
+        raise RuntimeError("SBOM creationInfo missing")
+    if creation_info.get("creators") != expected["creationInfo"]["creators"]:
+        raise RuntimeError("SBOM creationInfo creators mismatch")
+
+    created = creation_info.get("created")
+    if not isinstance(created, str) or not SPDX_CREATED_RE.fullmatch(created):
+        raise RuntimeError("SBOM creationInfo created is not canonical UTC")
+    try:
+        normalized = normalize_git_timestamp(created)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "SBOM creationInfo created is not a valid timestamp"
+        ) from exc
+    if normalized != created:
+        raise RuntimeError("SBOM creationInfo created is not canonical UTC")
+
+
 def _verify_spdx_dependencies(
     *,
     sbom_json: dict,
@@ -335,6 +408,11 @@ def _verify_spdx_dependencies(
         or root.get("versionInfo") != version
     ):
         raise RuntimeError("SBOM root package/version mismatch")
+    _require_spdx_fields(
+        root,
+        spdx_root_package(version=version),
+        context="SBOM root package",
+    )
     if sbom_json.get("documentDescribes") != [root_id]:
         raise RuntimeError("SBOM documentDescribes mismatch")
 
@@ -347,6 +425,15 @@ def _verify_spdx_dependencies(
             or row.get("versionInfo") != dep_version
         ):
             raise RuntimeError(f"SBOM core dependency mismatch: {name}")
+        _require_spdx_fields(
+            row,
+            spdx_dependency(
+                name=name,
+                version=dep_version,
+                scope="core",
+            ),
+            context=f"SBOM core dependency {name}",
+        )
         if (root_id, "DEPENDS_ON", dep_id) not in relationship_set:
             raise RuntimeError(f"SBOM core dependency relationship missing: {name}")
 
@@ -359,6 +446,15 @@ def _verify_spdx_dependencies(
             or row.get("versionInfo") != dep_version
         ):
             raise RuntimeError(f"SBOM optional TUI dependency mismatch: {name}")
+        _require_spdx_fields(
+            row,
+            spdx_dependency(
+                name=name,
+                version=dep_version,
+                scope="optional_tui",
+            ),
+            context=f"SBOM optional TUI dependency {name}",
+        )
         if (dep_id, "OPTIONAL_DEPENDENCY_OF", root_id) not in relationship_set:
             raise RuntimeError(
                 f"SBOM optional TUI dependency relationship missing: {name}"
@@ -372,6 +468,11 @@ def _verify_spdx_dependencies(
         or hidapi.get("versionInfo") != "0.15.0"
     ):
         raise RuntimeError("SBOM vendored hidapi package/version mismatch")
+    _require_spdx_fields(
+        hidapi,
+        spdx_vendored_hidapi_package(),
+        context="SBOM vendored hidapi package",
+    )
     if (root_id, "DEPENDS_ON", hidapi_id) not in relationship_set:
         raise RuntimeError("SBOM vendored hidapi dependency relationship missing")
 
@@ -399,6 +500,19 @@ def _verify_spdx_dependencies(
         }
         if sha256_values != {actual_hash}:
             raise RuntimeError(f"SBOM vendored hidapi SHA-256 mismatch: {arch}")
+        expected_file = spdx_hidapi_file(
+            arch=arch,
+            checksum=actual_hash,
+        )
+        _require_spdx_fields(
+            row,
+            {
+                "licenseConcluded": expected_file["licenseConcluded"],
+                "licenseInfoInFiles": expected_file["licenseInfoInFiles"],
+                "copyrightText": expected_file["copyrightText"],
+            },
+            context=f"SBOM vendored hidapi file {arch}",
+        )
         if (hidapi_id, "CONTAINS", file_id) not in relationship_set:
             raise RuntimeError(
                 f"SBOM vendored hidapi containment relationship missing: {arch}"
@@ -561,6 +675,11 @@ def _verify_payload(
     if fmt == "g502x-release-v1":
         _verify_historical_v1_sbom(sbom_json)
     else:
+        _verify_spdx_document(
+            sbom_json=sbom_json,
+            version=version,
+            source_commit=source_commit,
+        )
         _verify_spdx_dependencies(
             sbom_json=sbom_json,
             version=version,

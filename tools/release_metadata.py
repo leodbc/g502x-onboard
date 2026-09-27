@@ -110,7 +110,38 @@ def parse_requirements_lock(text: str) -> dict[str, str]:
     return dict(sorted(packages.items()))
 
 
-def _spdx_dependency(
+def spdx_document_semantics(*, version: str, source_commit: str) -> dict:
+    """Return canonical static SPDX document semantics for a release."""
+    return {
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": f"g502x-onboard-{version}",
+        "documentNamespace": (
+            "https://spdx.org/spdxdocs/"
+            f"g502x-onboard-{source_commit}"
+        ),
+        "creationInfo": {
+            "creators": ["Tool: g502x-release-metadata"],
+        },
+        "documentDescribes": ["SPDXRef-Package-g502x-onboard"],
+    }
+
+
+def spdx_root_package(*, version: str) -> dict:
+    return {
+        "SPDXID": "SPDXRef-Package-g502x-onboard",
+        "name": "g502x-onboard",
+        "versionInfo": version,
+        "downloadLocation": "NOASSERTION",
+        "filesAnalyzed": False,
+        "licenseConcluded": "GPL-3.0-only",
+        "licenseDeclared": "GPL-3.0-only",
+        "copyrightText": "NOASSERTION",
+    }
+
+
+def spdx_dependency(
     *,
     name: str,
     version: str,
@@ -126,7 +157,7 @@ def _spdx_dependency(
         name,
         {"license": "NOASSERTION", "download": "NOASSERTION"},
     )
-    package = {
+    return {
         "SPDXID": spdx_pypi_id(name),
         "name": name,
         "versionInfo": version,
@@ -148,7 +179,42 @@ def _spdx_dependency(
             else "Optional Textual UI runtime dependency from requirements-tui.txt."
         ),
     }
-    return package
+
+
+def spdx_vendored_hidapi_package() -> dict:
+    return {
+        "SPDXID": "SPDXRef-Package-vendored-hidapi",
+        "name": "hidapi",
+        "versionInfo": "0.15.0",
+        "downloadLocation": (
+            "https://github.com/libusb/hidapi/releases/tag/hidapi-0.15.0"
+        ),
+        "filesAnalyzed": False,
+        "licenseConcluded": "BSD-3-Clause",
+        "licenseDeclared": "BSD-3-Clause",
+        "copyrightText": "NOASSERTION",
+        "comment": (
+            "Windows DLLs are inherited byte-for-byte from the recorded "
+            "lexr1/omm.py commit. Exact inherited DLL SHA-256 values are "
+            "documented and release-bound."
+        ),
+    }
+
+
+def spdx_hidapi_file(*, arch: str, checksum: str) -> dict:
+    return {
+        "SPDXID": f"SPDXRef-File-hidapi-{arch}",
+        "fileName": f"./libs/{arch}/hidapi.dll",
+        "checksums": [
+            {
+                "algorithm": "SHA256",
+                "checksumValue": checksum,
+            }
+        ],
+        "licenseConcluded": "BSD-3-Clause",
+        "licenseInfoInFiles": ["BSD-3-Clause"],
+        "copyrightText": "NOASSERTION",
+    }
 
 
 def build_spdx(
@@ -175,22 +241,11 @@ def build_spdx(
         )
 
     root_id = "SPDXRef-Package-g502x-onboard"
-    spdx_packages = [
-        {
-            "SPDXID": root_id,
-            "name": "g502x-onboard",
-            "versionInfo": version,
-            "downloadLocation": "NOASSERTION",
-            "filesAnalyzed": False,
-            "licenseConcluded": "GPL-3.0-only",
-            "licenseDeclared": "GPL-3.0-only",
-            "copyrightText": "NOASSERTION",
-        }
-    ]
+    spdx_packages = [spdx_root_package(version=version)]
     relationships = []
 
     for name, dep_version in core_packages.items():
-        package = _spdx_dependency(name=name, version=dep_version, scope="core")
+        package = spdx_dependency(name=name, version=dep_version, scope="core")
         spdx_packages.append(package)
         relationships.append(
             {
@@ -201,7 +256,11 @@ def build_spdx(
         )
 
     for name, dep_version in optional_packages.items():
-        package = _spdx_dependency(name=name, version=dep_version, scope="optional_tui")
+        package = spdx_dependency(
+            name=name,
+            version=dep_version,
+            scope="optional_tui",
+        )
         spdx_packages.append(package)
         relationships.append(
             {
@@ -212,23 +271,7 @@ def build_spdx(
         )
 
     hidapi_id = "SPDXRef-Package-vendored-hidapi"
-    spdx_packages.append(
-        {
-            "SPDXID": hidapi_id,
-            "name": "hidapi",
-            "versionInfo": "0.15.0",
-            "downloadLocation": "https://github.com/libusb/hidapi/releases/tag/hidapi-0.15.0",
-            "filesAnalyzed": False,
-            "licenseConcluded": "BSD-3-Clause",
-            "licenseDeclared": "BSD-3-Clause",
-            "copyrightText": "NOASSERTION",
-            "comment": (
-                "Windows DLLs are inherited byte-for-byte from the recorded "
-                "lexr1/omm.py commit. Exact inherited DLL SHA-256 values are "
-                "documented and release-bound."
-            ),
-        }
-    )
+    spdx_packages.append(spdx_vendored_hidapi_package())
     relationships.append(
         {
             "spdxElementId": root_id,
@@ -241,21 +284,11 @@ def build_spdx(
     for arch, raw_path in sorted(hidapi_files.items()):
         path = Path(raw_path)
         file_id = f"SPDXRef-File-hidapi-{arch}"
-        rel = f"./libs/{arch}/hidapi.dll"
         files.append(
-            {
-                "SPDXID": file_id,
-                "fileName": rel,
-                "checksums": [
-                    {
-                        "algorithm": "SHA256",
-                        "checksumValue": sha256_file(path),
-                    }
-                ],
-                "licenseConcluded": "BSD-3-Clause",
-                "licenseInfoInFiles": ["BSD-3-Clause"],
-                "copyrightText": "NOASSERTION",
-            }
+            spdx_hidapi_file(
+                arch=arch,
+                checksum=sha256_file(path),
+            )
         )
         relationships.append(
             {
@@ -265,24 +298,21 @@ def build_spdx(
             }
         )
 
-    return {
-        "spdxVersion": "SPDX-2.3",
-        "dataLicense": "CC0-1.0",
-        "SPDXID": "SPDXRef-DOCUMENT",
-        "name": f"g502x-onboard-{version}",
-        "documentNamespace": (
-            "https://spdx.org/spdxdocs/"
-            f"g502x-onboard-{source_commit}"
-        ),
-        "creationInfo": {
-            "created": normalize_git_timestamp(source_timestamp),
-            "creators": ["Tool: g502x-release-metadata"],
-        },
-        "documentDescribes": [root_id],
-        "packages": spdx_packages,
-        "files": files,
-        "relationships": relationships,
-    }
+    document = spdx_document_semantics(
+        version=version,
+        source_commit=source_commit,
+    )
+    document["creationInfo"]["created"] = normalize_git_timestamp(
+        source_timestamp
+    )
+    document.update(
+        {
+            "packages": spdx_packages,
+            "files": files,
+            "relationships": relationships,
+        }
+    )
+    return document
 
 
 def write_spdx(path: str | Path, **kwargs) -> Path:

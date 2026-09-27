@@ -49,6 +49,22 @@ digests and package sets, the exact SPDX package/file/relationship model plus
 canonical `documentDescribes`, canonical ZIP layout, checksum sidecar when
 present, path safety, and the assertion that private state is absent.
 
+For the v0.2 SPDX document, verification also enforces the canonical semantic
+claims emitted by the release builder: SPDX 2.3 / CC0-1.0 document identity,
+the exact release name and source-bound namespace, the release-metadata tool
+creator, root-package download/license/analyzed-file semantics, core and
+optional dependency download/license/purl/scope provenance, vendored hidapi
+version/download/license/provenance, and vendored DLL license rows. These
+checks are semantic field checks; the verifier does not require byte-for-byte
+SBOM regeneration.
+
+`creationInfo.created` is required to be a valid normalized UTC timestamp at
+second resolution in the builder's canonical `YYYY-MM-DDTHH:MM:SSZ` form.
+The release manifest does not independently authenticate the Git commit
+timestamp, so verification does **not** claim that this field equals Git commit
+time; it validates presence, timestamp validity, UTC normalization, and
+canonical representation only.
+
 The verifier continues to accept the historical v1 manifest format only for
 the immutable v0.1.0 contract. In addition to version 0.1.0, the recorded
 source commit, historical CLI entry point/dependency shape, and canonical
