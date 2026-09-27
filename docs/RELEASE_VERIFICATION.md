@@ -45,15 +45,27 @@ python tools/verify_release.py g502x-onboard-0.2.0
 
 The v0.2 verifier checks the exact file set, per-file SHA-256/size records,
 source-commit binding, package/release version agreement, both dependency-lock
-digests and package sets, SPDX dependency scope, canonical ZIP layout, checksum
-sidecar when present, path safety, and the assertion that private state is
-absent.
+digests and package sets, the exact SPDX package/file/relationship model plus
+canonical `documentDescribes`, canonical ZIP layout, checksum sidecar when
+present, path safety, and the assertion that private state is absent.
 
 The verifier continues to accept the historical v1 manifest format only for
-the immutable v0.1.0 contract: version 0.1.0, its recorded source commit,
-historical CLI entry point/dependency shape, and canonical archive root. A
-current or future artifact cannot select v1 as a weaker fallback path. This
-compatibility does not modify the immutable v0.1.0 release.
+the immutable v0.1.0 contract. In addition to version 0.1.0, the recorded
+source commit, historical CLI entry point/dependency shape, and canonical
+archive root, the raw `RELEASE_MANIFEST.json` bytes must match the immutable
+published v0.1.0 manifest asset SHA-256:
+
+`79eaa918186b1b084331c2c66c5dd188d5d20eeb5a9db70b9e32dbf4e1659692`
+
+That published manifest fixes the historical file set, per-file sizes and
+SHA-256 values, plus the SBOM digest; the verifier then rechecks those declared
+bytes against the supplied payload. This makes v1 compatibility content-bound
+rather than a generic weaker format for newly constructed artifacts. The
+digest is frozen from immutable GitHub Release asset 582484050; the same
+release records the canonical ZIP SHA-256
+`933d4446d612a8c63d00b3c08d2ffd45631504f9b61999075efe137d4e68919d`.
+Verification remains deterministic/offline and does not modify or query the
+historical release at runtime.
 
 ## Extracted-artifact smoke
 
