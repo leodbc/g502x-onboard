@@ -18,6 +18,7 @@ from release_metadata import (
     spdx_dependency,
     spdx_document_semantics,
     spdx_hidapi_file,
+    spdx_hidapi_provenance_relationship,
     spdx_pypi_id,
     spdx_root_package,
     spdx_vendored_hidapi_package,
@@ -280,6 +281,22 @@ def _require_spdx_fields(
             raise RuntimeError(f"{context} {key} mismatch")
 
 
+def _verify_spdx_package_conditionals(
+    row: dict,
+    *,
+    context: str,
+) -> None:
+    files_analyzed = row.get("filesAnalyzed")
+    if "filesAnalyzed" in row and not isinstance(files_analyzed, bool):
+        raise RuntimeError(f"{context} filesAnalyzed must be boolean")
+    if files_analyzed is False:
+        for forbidden in ("packageVerificationCode", "licenseInfoFromFiles"):
+            if forbidden in row:
+                raise RuntimeError(
+                    f"{context} {forbidden} forbidden when filesAnalyzed=false"
+                )
+
+
 def _verify_spdx_document(
     *,
     sbom_json: dict,
@@ -370,6 +387,10 @@ def _verify_spdx_dependencies(
                 f"{canonical!r} ({previous}, {spdx_id})"
             )
         canonical_package_names[canonical] = spdx_id
+        _verify_spdx_package_conditionals(
+            row,
+            context=f"SBOM package {spdx_id}",
+        )
         package_rows[spdx_id] = row
 
     file_rows: dict[str, dict] = {}
@@ -385,6 +406,7 @@ def _verify_spdx_dependencies(
 
     all_ids = {document_id, *package_rows, *file_rows}
     relationship_set: set[tuple[str, str, str]] = set()
+    relationship_rows: dict[tuple[str, str, str], dict] = {}
     for row in relationships:
         if not isinstance(row, dict):
             raise RuntimeError("SBOM relationship row invalid")
@@ -399,6 +421,7 @@ def _verify_spdx_dependencies(
         if triple in relationship_set:
             raise RuntimeError("SBOM duplicate relationship")
         relationship_set.add(triple)
+        relationship_rows[triple] = row
 
     root_id = "SPDXRef-Package-g502x-onboard"
     root = package_rows.get(root_id)
@@ -513,10 +536,22 @@ def _verify_spdx_dependencies(
             },
             context=f"SBOM vendored hidapi file {arch}",
         )
-        if (hidapi_id, "CONTAINS", file_id) not in relationship_set:
+        expected_provenance = spdx_hidapi_provenance_relationship(arch=arch)
+        provenance_triple = (
+            expected_provenance["spdxElementId"],
+            expected_provenance["relationshipType"],
+            expected_provenance["relatedSpdxElement"],
+        )
+        provenance_row = relationship_rows.get(provenance_triple)
+        if provenance_row is None:
             raise RuntimeError(
-                f"SBOM vendored hidapi containment relationship missing: {arch}"
+                f"SBOM vendored hidapi provenance relationship missing: {arch}"
             )
+        _require_spdx_fields(
+            provenance_row,
+            expected_provenance,
+            context=f"SBOM vendored hidapi provenance relationship {arch}",
+        )
 
     expected_package_ids = {root_id, hidapi_id}
     expected_package_ids.update(
@@ -556,8 +591,16 @@ def _verify_spdx_dependencies(
     expected_relationships.update(
         {
             (root_id, "DEPENDS_ON", hidapi_id),
-            (hidapi_id, "CONTAINS", "SPDXRef-File-hidapi-x64"),
-            (hidapi_id, "CONTAINS", "SPDXRef-File-hidapi-x86"),
+            (
+                "SPDXRef-File-hidapi-x64",
+                "OTHER",
+                hidapi_id,
+            ),
+            (
+                "SPDXRef-File-hidapi-x86",
+                "OTHER",
+                hidapi_id,
+            ),
         }
     )
     if relationship_set != expected_relationships:

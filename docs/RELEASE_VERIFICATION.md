@@ -58,6 +58,21 @@ version/download/license/provenance, and vendored DLL license rows. These
 checks are semantic field checks; the verifier does not require byte-for-byte
 SBOM regeneration.
 
+The vendored hidapi package is modeled as an external/upstream hidapi 0.15.0
+metadata reference with `filesAnalyzed=false`. The two shipped DLLs remain
+separate SPDX File elements. Each DLL points to that external package with an
+`OTHER` relationship and a canonical relationship comment recording the
+byte-for-byte provenance through the recorded lexr1/omm.py lineage. The model
+intentionally does not use `CONTAINS` or `GENERATED_FROM`: the repository
+evidence establishes provenance, but does not establish that the external
+metadata package contains the release files or that this project generated
+those DLLs.
+
+For every SPDX package row with `filesAnalyzed=false`, the verifier also
+rejects `packageVerificationCode` and `licenseInfoFromFiles`, because SPDX
+2.3 requires those conditional fields to be omitted in the non-analyzed
+package state.
+
 `creationInfo.created` is required to be a valid normalized UTC timestamp at
 second resolution in the builder's canonical `YYYY-MM-DDTHH:MM:SSZ` form.
 The release manifest does not independently authenticate the Git commit

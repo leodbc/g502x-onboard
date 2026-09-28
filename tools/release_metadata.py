@@ -194,9 +194,10 @@ def spdx_vendored_hidapi_package() -> dict:
         "licenseDeclared": "BSD-3-Clause",
         "copyrightText": "NOASSERTION",
         "comment": (
-            "Windows DLLs are inherited byte-for-byte from the recorded "
-            "lexr1/omm.py commit. Exact inherited DLL SHA-256 values are "
-            "documented and release-bound."
+            "Represents external/upstream hidapi 0.15.0 metadata. Windows "
+            "DLLs shipped by this release are inherited byte-for-byte from "
+            "the recorded lexr1/omm.py commit; exact inherited DLL SHA-256 "
+            "values are documented and release-bound."
         ),
     }
 
@@ -214,6 +215,19 @@ def spdx_hidapi_file(*, arch: str, checksum: str) -> dict:
         "licenseConcluded": "BSD-3-Clause",
         "licenseInfoInFiles": ["BSD-3-Clause"],
         "copyrightText": "NOASSERTION",
+    }
+
+
+def spdx_hidapi_provenance_relationship(*, arch: str) -> dict:
+    return {
+        "spdxElementId": f"SPDXRef-File-hidapi-{arch}",
+        "relationshipType": "OTHER",
+        "relatedSpdxElement": "SPDXRef-Package-vendored-hidapi",
+        "comment": (
+            f"Vendored {arch} hidapi.dll is inherited byte-for-byte from "
+            "hidapi 0.15.0 through the recorded lexr1/omm.py provenance "
+            "lineage."
+        ),
     }
 
 
@@ -291,11 +305,7 @@ def build_spdx(
             )
         )
         relationships.append(
-            {
-                "spdxElementId": hidapi_id,
-                "relationshipType": "CONTAINS",
-                "relatedSpdxElement": file_id,
-            }
+            spdx_hidapi_provenance_relationship(arch=arch)
         )
 
     document = spdx_document_semantics(

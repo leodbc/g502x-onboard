@@ -60,6 +60,17 @@ and are identified as hidapi 0.15.0.
 On Windows the loader checks architecture, expected bundled path, hidapi version
 and SHA-256 before HID enumeration.
 
+In the v0.2.0 SPDX model, `SPDXRef-Package-vendored-hidapi` represents
+external/upstream hidapi 0.15.0 metadata rather than a package whose file
+contents were analyzed by this project, so it remains `filesAnalyzed=false`.
+The shipped x64/x86 DLLs are separate release File elements. Each file has an
+`OTHER` relationship pointing to the external hidapi package, with an exact
+relationship comment recording that the DLL is inherited byte-for-byte through
+the recorded lexr1/omm.py provenance lineage. This deliberately avoids
+`CONTAINS`, which would assert package membership, and `GENERATED_FROM`,
+which would assert a build/generation fact not established by the recorded
+provenance.
+
 ## Release metadata
 
 Release builds generate:

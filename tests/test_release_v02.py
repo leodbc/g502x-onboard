@@ -238,8 +238,30 @@ class ReleaseV02IntegrationTests(unittest.TestCase):
             "SPDXRef-Package-vendored-hidapi",
         )
         self.assertEqual(vendored["versionInfo"], "0.15.0")
+        self.assertIs(vendored["filesAnalyzed"], False)
         self.assertEqual(vendored["licenseDeclared"], "BSD-3-Clause")
         self.assertEqual(vendored["licenseConcluded"], "BSD-3-Clause")
+        self.assertIn("external/upstream hidapi 0.15.0", vendored["comment"])
+
+        for arch in ("x64", "x86"):
+            file_id = f"SPDXRef-File-hidapi-{arch}"
+            provenance = next(
+                row
+                for row in self.sbom["relationships"]
+                if row.get("spdxElementId") == file_id
+                and row.get("relationshipType") == "OTHER"
+                and row.get("relatedSpdxElement")
+                == "SPDXRef-Package-vendored-hidapi"
+            )
+            self.assertIn("inherited byte-for-byte", provenance["comment"])
+        self.assertFalse(
+            any(
+                row.get("spdxElementId")
+                == "SPDXRef-Package-vendored-hidapi"
+                and row.get("relationshipType") == "CONTAINS"
+                for row in self.sbom["relationships"]
+            )
+        )
 
         dll = self._spdx_row(
             self.sbom,
@@ -400,6 +422,50 @@ class ReleaseV02IntegrationTests(unittest.TestCase):
                 self._assert_sbom_mutation_rejected(
                     mutate,
                     "SBOM optional TUI dependency textual",
+                )
+
+    def test_spdx_false_files_analyzed_rejects_conditional_package_fields(self):
+        package_ids = (
+            "SPDXRef-Package-pypi-hid",
+            "SPDXRef-Package-vendored-hidapi",
+        )
+        forbidden_fields = (
+            (
+                "packageVerificationCode",
+                {"packageVerificationCodeValue": "a" * 40},
+            ),
+            ("licenseInfoFromFiles", ["BSD-3-Clause"]),
+        )
+
+        for package_id in package_ids:
+            for field, value in forbidden_fields:
+                def mutate(sbom, package_id=package_id, field=field, value=value):
+                    self._spdx_row(
+                        sbom,
+                        "packages",
+                        package_id,
+                    )[field] = value
+
+                with self.subTest(package_id=package_id, field=field):
+                    self._assert_sbom_mutation_rejected(
+                        mutate,
+                        "forbidden when filesAnalyzed=false",
+                    )
+
+    def test_spdx_files_analyzed_requires_real_boolean(self):
+        root_id = "SPDXRef-Package-g502x-onboard"
+        for bad_value in ("false", 0, 1, None):
+            def mutate(sbom, bad_value=bad_value):
+                self._spdx_row(
+                    sbom,
+                    "packages",
+                    root_id,
+                )["filesAnalyzed"] = bad_value
+
+            with self.subTest(value=bad_value):
+                self._assert_sbom_mutation_rejected(
+                    mutate,
+                    "filesAnalyzed",
                 )
 
     def test_spdx_vendored_hidapi_semantic_mutations_are_rejected(self):
@@ -578,7 +644,7 @@ class ReleaseV02IntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "dependency relationship missing"):
                 verify_directory(root)
 
-    def test_spdx_missing_hidapi_containment_is_rejected(self):
+    def test_spdx_missing_hidapi_provenance_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = self._copy_release(Path(td))
 
@@ -586,15 +652,73 @@ class ReleaseV02IntegrationTests(unittest.TestCase):
                 sbom["relationships"] = [
                     row for row in sbom["relationships"]
                     if not (
-                        row.get("spdxElementId") == "SPDXRef-Package-vendored-hidapi"
-                        and row.get("relationshipType") == "CONTAINS"
-                        and row.get("relatedSpdxElement") == "SPDXRef-File-hidapi-x64"
+                        row.get("spdxElementId") == "SPDXRef-File-hidapi-x64"
+                        and row.get("relationshipType") == "OTHER"
+                        and row.get("relatedSpdxElement")
+                        == "SPDXRef-Package-vendored-hidapi"
                     )
                 ]
 
             self._mutate_sbom(root, mutate)
-            with self.assertRaisesRegex(RuntimeError, "containment relationship missing"):
+            with self.assertRaisesRegex(RuntimeError, "provenance relationship missing"):
                 verify_directory(root)
+
+    def test_spdx_false_analyzed_hidapi_cannot_claim_containment(self):
+        def mutate(sbom):
+            for row in sbom["relationships"]:
+                if (
+                    row.get("spdxElementId") == "SPDXRef-File-hidapi-x64"
+                    and row.get("relationshipType") == "OTHER"
+                    and row.get("relatedSpdxElement")
+                    == "SPDXRef-Package-vendored-hidapi"
+                ):
+                    row.pop("comment", None)
+                    row["spdxElementId"] = "SPDXRef-Package-vendored-hidapi"
+                    row["relationshipType"] = "CONTAINS"
+                    row["relatedSpdxElement"] = "SPDXRef-File-hidapi-x64"
+                    return
+            self.fail("canonical hidapi provenance relationship not found")
+
+        self._assert_sbom_mutation_rejected(
+            mutate,
+            "provenance relationship missing|relationship set mismatch",
+        )
+
+    def test_spdx_hidapi_provenance_type_and_direction_are_exact(self):
+        def wrong_type(sbom):
+            for row in sbom["relationships"]:
+                if (
+                    row.get("spdxElementId") == "SPDXRef-File-hidapi-x64"
+                    and row.get("relationshipType") == "OTHER"
+                    and row.get("relatedSpdxElement")
+                    == "SPDXRef-Package-vendored-hidapi"
+                ):
+                    row["relationshipType"] = "GENERATED_FROM"
+                    return
+            self.fail("canonical hidapi provenance relationship not found")
+
+        def wrong_direction(sbom):
+            for row in sbom["relationships"]:
+                if (
+                    row.get("spdxElementId") == "SPDXRef-File-hidapi-x64"
+                    and row.get("relationshipType") == "OTHER"
+                    and row.get("relatedSpdxElement")
+                    == "SPDXRef-Package-vendored-hidapi"
+                ):
+                    row["spdxElementId"] = "SPDXRef-Package-vendored-hidapi"
+                    row["relatedSpdxElement"] = "SPDXRef-File-hidapi-x64"
+                    return
+            self.fail("canonical hidapi provenance relationship not found")
+
+        for label, mutate in (
+            ("type", wrong_type),
+            ("direction", wrong_direction),
+        ):
+            with self.subTest(label=label):
+                self._assert_sbom_mutation_rejected(
+                    mutate,
+                    "provenance relationship missing|relationship set mismatch",
+                )
 
     def test_spdx_duplicate_id_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
