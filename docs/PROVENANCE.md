@@ -27,6 +27,26 @@ The runtime Python dependency is hash-locked in `requirements.txt`:
 
 The release requires pip hash checking.
 
+## Optional Textual UI dependency set
+
+The optional v0.2.0 terminal UI dependency closure is separate from the core
+runtime and is exact-pinned/hash-locked in `requirements-tui.txt`:
+
+- `textual==8.2.8`
+- `markdown-it-py==4.2.0`
+- `mdit-py-plugins==0.6.1`
+- `rich==15.0.0`
+- `typing-extensions==4.16.0`
+- `platformdirs==4.11.14`
+- `pygments==2.21.0`
+- `linkify-it-py==2.1.0`
+- `uc-micro-py==2.0.0`
+- `mdurl==0.1.2`
+
+These packages are represented in the v0.2.0 SPDX SBOM as optional TUI
+dependencies rather than mandatory core dependencies. Exact distribution hashes
+remain authoritative in the committed lock file.
+
 ## Vendored Windows hidapi
 
 The Windows DLLs are inherited byte-for-byte from the recorded omm.py commit
@@ -40,12 +60,25 @@ and are identified as hidapi 0.15.0.
 On Windows the loader checks architecture, expected bundled path, hidapi version
 and SHA-256 before HID enumeration.
 
+In the v0.2.0 SPDX model, `SPDXRef-Package-vendored-hidapi` represents
+external/upstream hidapi 0.15.0 metadata rather than a package whose file
+contents were analyzed by this project, so it remains `filesAnalyzed=false`.
+The shipped x64/x86 DLLs are separate release File elements. Each file has an
+`OTHER` relationship pointing to the external hidapi package, with an exact
+relationship comment recording that the DLL is inherited byte-for-byte through
+the recorded lexr1/omm.py provenance lineage. This deliberately avoids
+`CONTAINS`, which would assert package membership, and `GENERATED_FROM`,
+which would assert a build/generation fact not established by the recorded
+provenance.
+
 ## Release metadata
 
 Release builds generate:
 
-- `RELEASE_MANIFEST.json` bound to the public source commit;
-- `SBOM.spdx.json` in SPDX 2.3 format;
+- `RELEASE_MANIFEST.json` bound to the public source commit and, for v0.2.0,
+  separately recording core and optional-TUI dependency locks;
+- `SBOM.spdx.json` in SPDX 2.3 format with core, optional TUI, and vendored
+  native dependency provenance;
 - deterministic ZIP output;
 - a SHA-256 sidecar;
 - GitHub build/SBOM attestations on tagged public releases.

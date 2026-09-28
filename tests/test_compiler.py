@@ -91,7 +91,7 @@ class CliWorkingDirectoryTests(unittest.TestCase):
 
     def test_offline_cli_does_not_depend_on_current_directory(self):
         self.assertIn("PASS", self._run_cli("selftest").stdout)
-        self.assertIn("0.1.0", self._run_cli("--version").stdout)
+        self.assertIn("0.2.0", self._run_cli("--version").stdout)
         payload = json.loads(self._run_cli("capabilities", "--json").stdout)
         self.assertIsInstance(payload, list)
         self.assertGreater(len(payload), 0)

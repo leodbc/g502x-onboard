@@ -8,7 +8,7 @@ data, validates the result, and writes it with readback and recovery safeguards.
 DPI, G-Shift bindings and supported macros run without G HUB or a resident
 companion process.
 
-**Current source version:** `0.1.0`
+**Current source version:** `0.2.0`
 
 Write support is intentionally narrow: it is hardware-validated on one G502 X
 LIGHTSPEED using the original LIGHTSPEED receiver, PID `C547`, subdevice `1`,
@@ -51,6 +51,34 @@ python -m pip install -r requirements.txt
 python g502x.py --version
 python g502x.py selftest
 ```
+
+### Optional terminal UI
+
+The v0.2.0 terminal UI is optional. Core CLI use continues to require only the
+core hash lock above. To add the Textual UI, install the separate exact-pinned,
+hash-locked optional dependency set:
+
+```bash
+python -m pip install -r requirements-tui.txt
+python g502x_tui.py
+```
+
+If the optional UI dependencies are absent, the core CLI remains usable and a
+TUI launch fails with install guidance before application/hardware construction.
+`python g502x_tui.py --help` is available without loading Textual.
+
+The TUI is a keyboard-first adapter over the same public application authority
+used by the CLI; it is not a second hardware implementation. The supported
+terminal target is 80x24. Below that size the UI enters an explicit constrained
+layout and blocks safety-critical global operation shortcuts until the terminal
+is enlarged.
+
+Hardware refresh is explicit: the TUI does not poll the mouse in the background.
+Privacy-safe/shareable, local-sensitive, and private-diagnostic surfaces remain
+distinct. Cooperative cancellation is available only before the persistent
+transaction reaches WRITING. From WRITING through reconciliation and
+post-validation, the UI presents the transaction as non-cancellable and awaits
+authoritative application completion.
 
 Before direct hardware access, fully close **Logitech G HUB** and
 **Logitech Onboard Memory Manager** if either is running.

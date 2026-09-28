@@ -654,6 +654,7 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             await wait_thread_event(
                 facade.phase_events[PersistentPhase.POST_VALIDATING],
                 "keyboard Enter did not drive the operation through post-validation",
+                timeout=10.0,
             )
             await submit
             await pilot.pause()

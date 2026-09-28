@@ -14,7 +14,16 @@ TOOLS = ROOT / "tools"
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
-from verify_release import verify_archive, verify_directory
+from verify_release import (
+    HISTORICAL_V1_ENTRYPOINT,
+    HISTORICAL_V1_MANIFEST_SHA256,
+    HISTORICAL_V1_RELEASE_NAME,
+    HISTORICAL_V1_SOURCE_COMMIT,
+    HISTORICAL_V1_VERSION,
+    _verify_historical_v1_manifest_digest,
+    verify_archive,
+    verify_directory,
+)
 
 
 def _sha(data: bytes) -> str:
@@ -23,11 +32,23 @@ def _sha(data: bytes) -> str:
 
 def _fixture(root: Path) -> None:
     payload = b"payload\n"
+    root_id = "SPDXRef-Package-g502x-onboard"
     sbom = {
         "spdxVersion": "SPDX-2.3",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": HISTORICAL_V1_RELEASE_NAME,
         "documentNamespace": (
-            "https://spdx.org/spdxdocs/test-" + "a" * 40
+            "https://spdx.org/spdxdocs/g502x-onboard-"
+            + HISTORICAL_V1_SOURCE_COMMIT
         ),
+        "documentDescribes": [root_id],
+        "packages": [
+            {
+                "SPDXID": root_id,
+                "name": "g502x-onboard",
+                "versionInfo": HISTORICAL_V1_VERSION,
+            }
+        ],
     }
     sbom_bytes = (
         json.dumps(sbom, sort_keys=True).encode("utf-8") + b"\n"
@@ -36,7 +57,10 @@ def _fixture(root: Path) -> None:
     (root / "SBOM.spdx.json").write_bytes(sbom_bytes)
     manifest = {
         "format": "g502x-release-v1",
-        "source_commit": "a" * 40,
+        "version": HISTORICAL_V1_VERSION,
+        "source_commit": HISTORICAL_V1_SOURCE_COMMIT,
+        "source_inputs_clean": True,
+        "entrypoint": HISTORICAL_V1_ENTRYPOINT,
         "private_state_included": False,
         "archive_reproducible": True,
         "archive_layout": {
@@ -73,9 +97,9 @@ def _fixture(root: Path) -> None:
 
 def _canonical_zip(root: Path, archive: Path) -> None:
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
-        for path in sorted(root.iterdir()):
+        for path in sorted(root.iterdir(), key=lambda path: path.name):
             info = zipfile.ZipInfo(
-                filename=f"release/{path.name}",
+                filename=f"{HISTORICAL_V1_RELEASE_NAME}/{path.name}",
                 date_time=(1980, 1, 1, 0, 0, 0),
             )
             info.create_system = 3
@@ -85,12 +109,83 @@ def _canonical_zip(root: Path, archive: Path) -> None:
 
 
 class ReleaseVerifierTests(unittest.TestCase):
-    def test_directory_accepts_exact_manifest(self):
+    def test_published_historical_manifest_digest_contract_is_accepted(self):
+        _verify_historical_v1_manifest_digest(
+            HISTORICAL_V1_MANIFEST_SHA256
+        )
+
+    def test_published_historical_manifest_digest_mutation_is_rejected(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "historical v1 manifest content digest",
+        ):
+            _verify_historical_v1_manifest_digest("0" * 64)
+
+    def test_self_consistent_historical_looking_payload_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "release"
             root.mkdir()
             _fixture(root)
-            verify_directory(root)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "historical v1 manifest content digest",
+            ):
+                verify_directory(root)
+
+    def test_single_file_mutation_with_recalculated_metadata_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "release"
+            root.mkdir()
+            _fixture(root)
+
+            payload = b"payload-mutated\n"
+            (root / "payload.txt").write_bytes(payload)
+            manifest_path = root / "RELEASE_MANIFEST.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["files"]["payload.txt"] = {
+                "sha256": _sha(payload),
+                "bytes": len(payload),
+            }
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "historical v1 manifest content digest",
+            ):
+                verify_directory(root)
+
+    def test_historical_v1_wrong_version_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "release"
+            root.mkdir()
+            _fixture(root)
+            manifest_path = root / "RELEASE_MANIFEST.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["version"] = "0.2.0"
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "historical v1 manifest version"):
+                verify_directory(root)
+
+    def test_historical_v1_wrong_source_identity_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "release"
+            root.mkdir()
+            _fixture(root)
+            manifest_path = root / "RELEASE_MANIFEST.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["source_commit"] = "b" * 40
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "historical v1 manifest source_commit"):
+                verify_directory(root)
 
     def test_directory_rejects_extra_file(self):
         with tempfile.TemporaryDirectory() as td:
@@ -146,7 +241,7 @@ class ReleaseVerifierTests(unittest.TestCase):
             ):
                 verify_archive(archive)
 
-    def test_archive_and_checksum_sidecar(self):
+    def test_archive_checksum_sidecar_precedes_historical_content_gate(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             root = base / "release"
@@ -159,7 +254,11 @@ class ReleaseVerifierTests(unittest.TestCase):
                 f"{digest}  {archive.name}\n",
                 encoding="ascii",
             )
-            verify_archive(archive)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "historical v1 manifest content digest",
+            ):
+                verify_archive(archive)
 
             archive.with_suffix(".zip.sha256").write_text(
                 f"{'0' * 64}  {archive.name}\n",
