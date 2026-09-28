@@ -36,4 +36,4 @@ python -m pip install -r requirements-tui.txt
 python g502x_tui.py
 ```
 
-The final read-only physical TUI release smoke is a separate release gate and is not claimed as completed by these notes.
+The final read-only physical TUI release smoke completed successfully on the merged v0.2.0 candidate. The smoke exercised TUI startup, one explicit read-only hardware refresh, privacy-safe presentation, keyboard navigation, and clean exit with zero persistent transactions, zero device writes, zero profile switches, and zero firmware/DFU operations.
