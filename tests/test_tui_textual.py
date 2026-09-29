@@ -744,26 +744,19 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await focus_id(pilot, app, "persistent-confirm")
-        confirmation = app.query_one("#persistent-confirm", Input)
         for character in "APPLY CONFIG":
-            key = "space" if character == " " else character
-            confirmation.post_message(textual_events.Key(key, character))
+            await pilot.press("space" if character == " " else character)
         await wait_until(
             pilot,
             lambda: app.tui_model.confirmation_input == "APPLY CONFIG",
             "keyboard confirmation did not reach the model",
         )
+        self.assertEqual(app.focused.id, "persistent-confirm")
     async def test_keyboard_only_prepare_review_exact_confirm_success(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
-
-            # Direct Key posting above exercises exact text entry without
-            # depending on terminal handling of spaces. Re-establish explicit
-            # keyboard focus before testing the real Enter submit contract.
-            await focus_id(pilot, app, "persistent-confirm")
-            self.assertEqual(app.focused.id, "persistent-confirm")
 
             # Keep the submit itself as a real keyboard Enter. Run it as a task
             # so the test can observe the synchronous facade worker phases
