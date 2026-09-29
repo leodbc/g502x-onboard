@@ -323,7 +323,6 @@ G502 X Onboard
 
 Current profile     Profile 1 — SAFE
 Onboard state       Validated
-Write activity      Nothing has been written in this operation
 
 What would you like to do?
 
@@ -343,7 +342,8 @@ Rules:
 - “State read successfully” means the last explicit foreground read succeeded.
 - “Validated” is shown only when the existing result actually establishes validation; otherwise use a narrower phrase such as “State read”.
 - “Profile 1 — SAFE” is shown only when active_profile=1 and existing project terminology supports SAFE. Other profiles use “Profile N”.
-- “Nothing has been written in this operation” MUST NOT be used to describe an unrelated prior session. It refers to the currently active/prepared operation context.
+- Ordinary refreshed idle Home MUST NOT show operation-scoped write facts when no operation exists.
+- “Nothing has been written yet” or equivalent operation-scoped wording is reserved for a real prepared/active operation context and only when authoritative lifecycle state establishes that no persistent write has started.
 - The Home snapshot is not automatically refreshed after time passes.
 
 ### 6.5 Read-only Home
@@ -364,22 +364,25 @@ R Refresh   ? Help   Q Exit
 
 The reason is shown in plain language when it is privacy-safe. Technical eligibility details remain secondary.
 
-### 6.6 Failed/no-device Home
+### 6.6 Failed-read Home
 
 Primary pattern:
 
 ~~~text
 [X] Device state could not be read
 
-No supported device state is available from this read.
+The application could not obtain a usable device state from this read.
 
-Check the connection, close competing Logitech configuration software if
-the error says it is required, then try again.
+Check the connection and try again.
+Open Help or Diagnostics for any additional information that is available
+to the current privacy surface.
 
 R Try again   ? Help   Q Exit
 ~~~
 
-The UI MUST preserve the typed error's distinction. It must not turn every read failure into “no device”.
+READ_FAILED means only that the latest explicit read failed or was refused. It does not by itself mean no device, unsupported device, competing Logitech writer, transport failure, firmware failure, or any other more specific cause.
+
+Condition-specific product copy MAY be used only when an existing typed result available to the current privacy surface independently identifies that condition. The UI MUST NOT infer a public cause from raw exception text, PRIVATE diagnostic detail, or humanized runner strings. If no privacy-safe typed distinction exists, the cause-neutral failed-read copy above is the required fallback.
 
 ## 7. Primary vs technical information hierarchy
 
@@ -665,7 +668,7 @@ Canonical phrases:
 - Operation stopped before writing
 - Write started; final state was not fully verified
 - Hardware outcome is unknown
-- Close G HUB and Logitech Onboard Memory Manager before continuing
+- Condition-specific when existing privacy-safe typed authority identifies a competing Logitech writer: Close G HUB and Logitech Onboard Memory Manager before continuing
 - State changed since review; prepare again
 
 ### 10.2 Technical language
@@ -716,6 +719,7 @@ Technical disclosure may retain exact concepts such as:
     - PRIVATE
 12. Technical/private detail cannot be promoted into primary shareable copy.
 13. Do not fabricate progress percentages. Use named stages unless deterministic completed/total units are supplied by the application.
+14. Terminal outcome is not a lifecycle fact bundle. A terminal FAILURE does not by itself determine whether writing started, reconciliation completed, or post-validation completed. Product copy MUST derive each of those facts independently from authoritative terminal state.
 
 ## 11. Persistent-flow UX
 
@@ -922,11 +926,13 @@ Apply configuration
 [FAIL] The operation did not complete successfully
 
 Writing started         Yes
-Readback completed      No
-Final validation        Not completed
+Readback/reconciliation <Completed | Not completed>
+Final validation        <Completed | Not completed>
 
-The final onboard state is not fully verified.
-Do not assume the mouse is unchanged.
+The displayed reconciliation and validation values come from the authoritative
+terminal result; they are not inferred from FAILED alone.
+The final guidance depends on those authoritative facts.
+Do not assume the mouse is unchanged without evidence.
 
 > View Technical details
   Return Home
@@ -934,7 +940,7 @@ Do not assume the mouse is unchanged.
 ? Help   Q Exit
 ~~~
 
-The exact available next action depends on the authoritative application result. The TUI MUST NOT invent a recovery write.
+The exact available next action depends on the authoritative application result. `writing_started`, `reconciliation_completed`, and `post_validation_completed` MUST each be rendered from authoritative terminal facts. The TUI MUST NOT hardcode “No”/“Not completed” from terminal FAILURE alone and MUST NOT invent a recovery write.
 
 ### 12.8 Unresolved adapter fault after write
 
@@ -1209,9 +1215,10 @@ Default error presentation is privacy-safe. Classified local/private detail appe
 
 | Condition | Primary copy | Allowed next action | Forbidden implication |
 | --- | --- | --- | --- |
-| No supported device | “No supported device state was found.” | Check connection; R retry; Diagnostics/Help | Do not imply a write-compatible device exists. |
-| Device unavailable | “The device is unavailable.” | R retry after fixing connection | Do not convert to “no device” if the typed error is different. |
-| Competing Logitech writer | “Close G HUB and Logitech Onboard Memory Manager before continuing.” | Close competing writer, prepare again | No “continue anyway”. |
+| Undifferentiated failed read | “Device state could not be read.” | Check connection; R retry; Help; permitted Diagnostics | Do not infer no-device, unsupported-device, host-guard, transport, firmware, or another cause from PRIVATE/raw strings. |
+| No supported device — only when an existing typed privacy-safe result independently identifies this condition | “No supported device state was found.” | Check connection; R retry; Diagnostics/Help | Do not imply this cause from generic BACKEND_FAILURE or private detail. |
+| Device unavailable — only when an existing typed privacy-safe result independently identifies this condition | “The device is unavailable.” | R retry after fixing connection | Do not infer availability cause from generic/private text. |
+| Competing Logitech writer — only when an existing typed privacy-safe result independently identifies this condition | “Close G HUB and Logitech Onboard Memory Manager before continuing.” | Close competing writer, prepare again | No “continue anyway”; do not infer the writer from PRIVATE/raw text. |
 | Read-only compatibility | “This device is read-only.” | Inspect/diagnose/refresh | No persistent or profile mutation enabled against policy. |
 | Invalid configuration | “Configuration could not be prepared.” | Fix config, plan/prepare again | Do not expose LOCAL SENSITIVE path/detail on SHAREABLE surface. |
 | Preparation rejected | “This operation cannot be prepared safely.” | Read typed safe reason; refresh/fix; prepare again | No executable prepared capability. |
@@ -1224,6 +1231,32 @@ Default error presentation is privacy-safe. Classified local/private detail appe
 Technical details may show ErrorCode and exact technical state if allowed by privacy classification.
 
 Raw exception text MUST NOT be promoted into default shareable copy.
+
+### 16.1 Privacy-safe cause authority
+
+Condition-specific product copy may be used only when an existing typed result available to the current privacy surface independently identifies that condition.
+
+If a read or preparation fails without an existing privacy-safe typed distinction, use cause-neutral product copy such as:
+
+~~~text
+[X] Device state could not be read
+
+The application could not obtain a usable device state from this read.
+
+Check the connection and try again.
+Open Help or Diagnostics for any additional information that is available
+to the current privacy surface.
+
+R Try again   ? Help   Q Exit
+~~~
+
+P7.2 MUST NOT recover a public cause by parsing raw exception text, PRIVATE diagnostic detail, humanized runner strings, or any other unclassified text channel.
+
+If P7.2 requires a finer product distinction such as no-device, device-unavailable, G HUB active, or Onboard Memory Manager active and that distinction is not already available as privacy-safe typed application data:
+
+    STOP AND RETURN TO ORCHESTRATION
+
+P7.2 is not authorized to solve that gap by duplicating backend detection, calling backend/device code directly, or silently changing ApplicationFacade. A future application-error-contract change requires a separately authorized orchestration decision.
 
 ## 17. First-run and empty-state contract
 
@@ -1241,8 +1274,11 @@ The initial screen:
 
 If an existing prerequisite such as a valid local setup baseline is missing and the existing application read returns a refusal/error:
 
-- show the typed safe error;
-- explain the next existing workflow in Contextual Help;
+- READ_FAILED remains cause-neutral unless existing privacy-safe typed authority independently identifies a more specific cause;
+- show only product copy supported by the typed result available to the current privacy surface;
+- otherwise use the generic privacy-safe failed-read fallback from §16.1;
+- never infer no-device, device-unavailable, G HUB/Onboard Memory Manager activity, transport failure, firmware failure, or another public cause from PRIVATE/raw text;
+- explain the next existing workflow in Contextual Help only when the current typed/privacy authority supports that guidance;
 - do not silently create/setup a baseline;
 - do not add a hidden setup write/read sequence;
 - do not broaden P7.1 into an onboarding backend redesign.
@@ -1289,9 +1325,10 @@ Technical disclosure MUST NOT make private diagnostic information shareable.
 | First launch | Understand where to start | Device state not read yet | Read state, navigate local areas, Help, Exit | Automatic hardware read | “Reading state does not modify the mouse.” | No background polling |
 | No refresh yet | Know whether screen is physically current | NEVER_READ | R, Help, local navigation | “Ready”/fresh-device claim | “Device state not read yet.” | Cached presentation != physical truth |
 | Refresh success | Read current onboard state | READ_OK + active profile/state | Navigate tasks, R again, Help | Hidden extra read | “State read successfully.” | Explicit foreground read only |
-| Refresh failure | Understand failed read | READ_FAILED + typed safe reason | Retry, Help, Diagnostics if local-only | Treat old data as fresh | “Device state could not be read.” | Typed application error authority |
+| Refresh failure | Understand failed read | READ_FAILED + cause-neutral failure state unless existing privacy-safe typed authority identifies more | Retry, Help, permitted Diagnostics | Infer cause from PRIVATE/raw strings; treat old data as fresh; claim no-device/host-guard/etc. without typed authority | “Device state could not be read.” | Typed application error + privacy authority |
 | Device read-only | Inspect without writing | Read-only status/reason | Read-only tasks, Help, Refresh | Persistent prepare/profile mutation if policy disallows | “This device is read-only.” | Unknown/unvalidated targets remain read-only |
-| No device | Recover from absence | No supported device state | Retry, Help | Claim supported mouse available | “No supported device state was found.” | No fabricated compatibility |
+| No device — only when identified by existing privacy-safe typed authority | Recover from typed absence | No supported device state | Retry, Help | Infer no-device from generic/private failure text; claim supported mouse available | “No supported device state was found.” | No fabricated compatibility |
+| Specific read/host-guard condition — only when identified by existing privacy-safe typed authority | Act on a known typed cause | Condition-specific product state | Only actions allowed by existing authority | Infer cause from PRIVATE/raw strings; make the condition mandatory when no typed distinction exists | Condition-specific copy supported by the typed result | Privacy-safe typed authority only |
 | Help | Understand current screen | Context-specific help | Navigate help, close help | Backend/facade call from help | Explicit “nothing written / cancellation” answer | Help is presentation-only |
 | Technical disclosure | Inspect exact engineering state | Secondary details | Open/close allowed detail | Promote private detail to shareable | Privacy label when required | Privacy classes |
 | Apply review | Understand intended write | What changes + what remains protected | Acknowledge, details, cancel | Execute without review/confirm | “Nothing has been written yet.” | Prepare is read-only; protected recovery |
@@ -1412,6 +1449,8 @@ Therefore:
 - If P7.2 is not authorized to touch runner.py, it MUST NOT work around the boundary by parsing completion strings.
 
 Any change to application/, backend/device, persistent implementation, or release tooling requires a fresh orchestration decision and is not authorized by this specification.
+
+The same STOP boundary applies to error classification. If P7.2 needs a finer public distinction (for example no-device, device-unavailable, G HUB active, or Onboard Memory Manager active) that is not already present in privacy-safe typed application data, it MUST STOP AND RETURN TO ORCHESTRATION rather than parse PRIVATE/raw text or silently change ApplicationFacade.
 
 ## 23. Validation strategy for P7.2 / P7.3
 
