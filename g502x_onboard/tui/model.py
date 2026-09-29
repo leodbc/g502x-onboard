@@ -25,6 +25,9 @@ def _next_operation_issuance() -> int:
 
 class Route(str, Enum):
     HOME = "home"
+    CONFIGURATION = "configuration"
+    BACKUP_RESTORE = "backup-restore"
+    DIAGNOSTICS = "diagnostics"
     OPERATION = "operation"
     REVIEW = "review"
     CONFIRMATION = "confirmation"
@@ -52,6 +55,29 @@ class OperationAction(str, Enum):
 class TerminalOutcome(str, Enum):
     SUCCESS = "success"
     FAILURE = "failure"
+
+
+class ReadTruth(str, Enum):
+    NEVER_READ = "never-read"
+    READING = "reading"
+    READ_OK = "read-ok"
+    READ_FAILED = "read-failed"
+
+
+@dataclass(frozen=True)
+class ReadProjection:
+    """TUI-owned privacy-safe scalar projection of an existing typed read result."""
+
+    source: OperationAction
+    device_name: str | None = None
+    active_profile: int | None = None
+    enabled_profiles: tuple[int, ...] = ()
+    read_only: bool | None = None
+    privacy: PrivacyClass = PrivacyClass.SHAREABLE
+
+    def __post_init__(self) -> None:
+        if self.privacy is not PrivacyClass.SHAREABLE:
+            raise ValueError("Home read projection must remain privacy-safe/shareable")
 
 
 @dataclass(frozen=True)
@@ -127,6 +153,9 @@ class TuiModel:
     route: Route = Route.HOME
     focus: FocusIntent = FocusIntent.PRIMARY
     surface_privacy: PrivacyClass = PrivacyClass.SHAREABLE
+    read_truth: ReadTruth = ReadTruth.NEVER_READ
+    read_state: ReadProjection | None = None
+    probe_state: ReadProjection | None = None
     read_only: bool = False
     read_only_reason: ApplicationError | None = None
     active: ForegroundOperation | None = None

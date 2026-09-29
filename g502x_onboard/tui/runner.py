@@ -37,7 +37,7 @@ from .events import (
     PreparedReceived,
     WorkerTransportFault,
 )
-from .model import OperationAction, OperationId
+from .model import OperationAction, OperationId, ReadProjection
 
 
 EmitEvent = Callable[[object], None]
@@ -124,7 +124,9 @@ class EffectRunner:
     def _run_refresh(self, effect: RequestExplicitRefresh) -> None:
         self._emit(OperationStarted(effect.operation_id))
         result = self._facade.status(private=False)
-        self._finish_ordinary(effect.operation_id, result)
+        self._finish_ordinary(
+            effect.operation_id, result, OperationAction.REFRESH
+        )
 
     def _run_foreground(self, effect: StartForegroundOperation) -> None:
         self._emit(OperationStarted(effect.operation_id))
@@ -145,16 +147,22 @@ class EffectRunner:
                             ),
                         )
                     )
-            self._finish_ordinary(effect.operation_id, result)
+            self._finish_ordinary(
+                effect.operation_id, result, OperationAction.PROBE
+            )
             return
         if effect.action is OperationAction.STATUS:
             self._finish_ordinary(
-                effect.operation_id, self._facade.status(private=False)
+                effect.operation_id,
+                self._facade.status(private=False),
+                OperationAction.STATUS,
             )
             return
         if effect.action is OperationAction.VALIDATE:
             self._finish_ordinary(
-                effect.operation_id, self._facade.validate()
+                effect.operation_id,
+                self._facade.validate(),
+                OperationAction.VALIDATE,
             )
             return
         if effect.action is OperationAction.PLAN:
@@ -171,7 +179,9 @@ class EffectRunner:
                 )
                 return
             self._finish_ordinary(
-                effect.operation_id, self._facade.plan(effect.config_path)
+                effect.operation_id,
+                self._facade.plan(effect.config_path),
+                OperationAction.PLAN,
             )
             return
         if effect.action is OperationAction.PROFILE_SWITCH:
@@ -192,17 +202,21 @@ class EffectRunner:
                 self._facade.switch_profile(
                     effect.profile_target, effect.confirmation or ""
                 ),
+                OperationAction.PROFILE_SWITCH,
             )
             return
         if effect.action is OperationAction.REPORT:
             self._finish_ordinary(
                 effect.operation_id,
                 self._facade.report_probe(pid=None, index=None),
+                OperationAction.REPORT,
             )
             return
         if effect.action is OperationAction.REFRESH:
             self._finish_ordinary(
-                effect.operation_id, self._facade.status(private=False)
+                effect.operation_id,
+                self._facade.status(private=False),
+                OperationAction.REFRESH,
             )
             return
         self._emit(
@@ -332,7 +346,12 @@ class EffectRunner:
                 self._tokens.pop(key, None)
                 self._pending_cancellation.discard(key)
 
-    def _finish_ordinary(self, operation_id: OperationId, result) -> None:
+    def _finish_ordinary(
+        self,
+        operation_id: OperationId,
+        result,
+        action: OperationAction,
+    ) -> None:
         if not result.ok:
             self._emit(ApplicationFailed(operation_id, result.error))
             return
@@ -341,8 +360,28 @@ class EffectRunner:
                 operation_id,
                 self._message_for(result.value),
                 result.privacy,
+                self._read_projection(result.value, action),
             )
         )
+
+    @staticmethod
+    def _read_projection(value, action: OperationAction) -> ReadProjection | None:
+        if isinstance(value, StatusSnapshot):
+            return ReadProjection(
+                source=action,
+                active_profile=value.active_profile,
+                enabled_profiles=tuple(value.enabled_profiles),
+                privacy=value.privacy,
+            )
+        if isinstance(value, ProbeSnapshot):
+            return ReadProjection(
+                source=action,
+                device_name=value.device_name,
+                active_profile=value.active_profile,
+                read_only=not value.compatibility.write_allowed,
+                privacy=value.privacy,
+            )
+        return None
 
     @staticmethod
     def _message_for(value) -> str:

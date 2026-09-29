@@ -49,6 +49,7 @@ from .model import (
     ForegroundOperation,
     OperationAction,
     PresentationPayload,
+    ReadTruth,
     Route,
     TerminalOutcome,
     TerminalState,
@@ -263,6 +264,16 @@ def update(
             last_result=None,
             last_error=None,
             transient_notice=None,
+            read_truth=(
+                ReadTruth.READING
+                if event.action is OperationAction.REFRESH
+                else model.read_truth
+            ),
+            read_state=(
+                None
+                if event.action is OperationAction.REFRESH
+                else model.read_state
+            ),
         )
         if event.action is OperationAction.PREPARE_PERSISTENT:
             if event.persistent_kind is None:
@@ -498,7 +509,15 @@ def update(
             event.operation_id, OperationAction.REFRESH, True
         )
         return replace(
-            model, active=active, route=Route.OPERATION
+            model,
+            active=active,
+            route=Route.OPERATION,
+            read_truth=ReadTruth.READING,
+            read_state=None,
+            terminal=None,
+            last_result=None,
+            last_error=None,
+            transient_notice=None,
         ), (RequestExplicitRefresh(event.operation_id),)
 
     if isinstance(event, ApplicationCompleted):
@@ -506,19 +525,66 @@ def update(
             return model, ()
         if model.active.persistent_kind is not None:
             return model, ()
+        action = model.active.action
         payload = _terminal_payload(
             event.message, event.privacy, model.surface_privacy
         )
+        if action is OperationAction.REFRESH:
+            projection = event.read_projection
+            if (
+                projection is None
+                or projection.source is not OperationAction.REFRESH
+                or projection.privacy is not PrivacyClass.SHAREABLE
+            ):
+                error = ApplicationError(
+                    ErrorCode.BACKEND_FAILURE,
+                    "refresh completed without privacy-safe typed read state",
+                    PrivacyClass.SHAREABLE,
+                )
+                return replace(
+                    model,
+                    active=None,
+                    read_truth=ReadTruth.READ_FAILED,
+                    read_state=None,
+                    terminal=TerminalState(
+                        TerminalOutcome.FAILURE,
+                        error_code=ErrorCode.BACKEND_FAILURE,
+                    ),
+                    last_result=None,
+                    last_error=error,
+                    route=Route.HOME,
+                ), ()
+            return replace(
+                model,
+                active=None,
+                read_truth=ReadTruth.READ_OK,
+                read_state=projection,
+                terminal=None,
+                last_result=payload,
+                last_error=None,
+                route=Route.HOME,
+            ), ()
+
+        probe_state = model.probe_state
+        if (
+            action is OperationAction.PROBE
+            and event.read_projection is not None
+            and event.read_projection.source is OperationAction.PROBE
+            and event.read_projection.privacy is PrivacyClass.SHAREABLE
+        ):
+            probe_state = event.read_projection
+
         terminal = TerminalState(TerminalOutcome.SUCCESS)
         return replace(
             model,
             active=None,
+            probe_state=probe_state,
             terminal=terminal,
             last_result=payload,
             last_error=None,
             profile_confirmation_input=(
                 ""
-                if model.active.action is OperationAction.PROFILE_SWITCH
+                if action is OperationAction.PROFILE_SWITCH
                 else model.profile_confirmation_input
             ),
             route=Route.RESULT,
@@ -562,9 +628,28 @@ def update(
     if isinstance(event, ApplicationFailed):
         if not _is_current(model, event.operation_id):
             return model, ()
+        action = model.active.action
         persistent = model.active.persistent_kind is not None
         if model.active.non_cancellable:
             return model, ()
+        if action is OperationAction.REFRESH:
+            error = _payload_for_surface(
+                event.error, model.surface_privacy
+            )
+            terminal = TerminalState(
+                TerminalOutcome.FAILURE, error_code=event.error.code
+            )
+            return replace(
+                model,
+                active=None,
+                read_truth=ReadTruth.READ_FAILED,
+                read_state=None,
+                terminal=terminal,
+                last_result=None,
+                last_error=error,
+                transient_notice=None,
+                route=Route.HOME,
+            ), ()
         if (
             persistent
             and not model.active.execution_requested
