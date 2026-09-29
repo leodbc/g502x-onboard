@@ -751,6 +751,7 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             confirmation.post_message(
                 textual_events.Key(key, character)
             )
+            await pilot.pause()
         await wait_until(
             pilot,
             lambda: app.tui_model.confirmation_input == "APPLY CONFIG",
@@ -769,16 +770,15 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
 
-            # Keep the submit itself as a real keyboard Enter. Run it as a task
-            # so the test can observe the synchronous facade worker phases
-            # without requiring Pilot.press() to become the worker scheduler.
-            submit = asyncio.create_task(pilot.press("enter"))
+            # Exercise the real Enter key sequentially. The priority binding
+            # delegates to the currently focused confirmation Input and the
+            # state engine remains the double-submit authority.
+            await pilot.press("enter")
             await wait_thread_event(
                 facade.phase_events[PersistentPhase.POST_VALIDATING],
                 "keyboard Enter did not drive the operation through post-validation",
                 timeout=10.0,
             )
-            await submit
             await pilot.pause()
 
             self.assertEqual(facade.execute_calls, 1)
