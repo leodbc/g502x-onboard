@@ -30,9 +30,9 @@ from g502x_onboard.application.models import (
 )
 from g502x_onboard.tui.events import (
     ChangePrivacySurface,
-    ConfirmationChanged,
     ConfirmationSubmitted,
 )
+from g502x_onboard.tui.effects import ExecutePreparedOperation
 from g502x_onboard.tui.model import OperationId, ReadTruth, Route
 
 try:
@@ -280,6 +280,26 @@ class HarnessFacade:
             self.release.wait(2.0)
         observer(PersistentPhaseSnapshot(PersistentPhase.RECONCILING, prepared.kind, False))
         self.phase_events[PersistentPhase.RECONCILING].set()
+        if self.execute_mode == "failure-after-reconciliation":
+            value = PersistentExecutionResult(
+                operation_kind=prepared.kind,
+                terminal_phase=PersistentPhase.FAILED,
+                success=False,
+                pre_write_status="failed-after-reconciliation",
+                writing_started=True,
+                reconciliation_completed=True,
+                post_validation_completed=False,
+                error_code=ErrorCode.BACKEND_FAILURE,
+                message="authoritative failure after reconciliation",
+                phase_trace=(
+                    PersistentPhase.REVALIDATING,
+                    PersistentPhase.ARMED,
+                    PersistentPhase.WRITING,
+                    PersistentPhase.RECONCILING,
+                    PersistentPhase.FAILED,
+                ),
+            )
+            return OperationResult(ok=True, value=value, privacy=value.privacy)
         observer(PersistentPhaseSnapshot(PersistentPhase.POST_VALIDATING, prepared.kind, False))
         self.phase_events[PersistentPhase.POST_VALIDATING].set()
         value = PersistentExecutionResult(
@@ -510,11 +530,11 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
                 "Configuration did not open",
             )
             await focus_id(pilot, app, "config-path")
-            for key in ("a", "p", "p", "l", "y", "q", "g", "r", "v", "n", "s", "b", "d", "c", "?"):
+            for key in ("a", "p", "p", "l", "y", "q", "g", "r", "v", "n", "s", "b", "d", "c", "t", "?"):
                 await pilot.press(key)
             await wait_until(
                 pilot,
-                lambda: app.tui_model.config_path_input == "applyqgrvnsbdc?",
+                lambda: app.tui_model.config_path_input == "applyqgrvnsbdct?",
                 "focused Input did not consume printable shortcut letters",
             )
             self.assertEqual(facade.calls, [])
@@ -673,6 +693,173 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Read truth: never-read", detail)
             self.assertEqual(facade.calls, [])
 
+    async def test_idle_contextual_help_reports_truth_without_facade_calls(self):
+        facade = HarnessFacade()
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            for route_key, heading, required in (
+                (
+                    "c",
+                    "HELP — Configuration",
+                    (
+                        "No physical state has been read in this session.",
+                        "Opening Configuration does not write persistent state.",
+                        "No cooperative cancellation is currently applicable",
+                    ),
+                ),
+                (
+                    "b",
+                    "HELP — Backup & Restore",
+                    (
+                        "Nothing is written merely by opening this area.",
+                        "No cooperative cancellation is currently applicable",
+                    ),
+                ),
+                (
+                    "d",
+                    "HELP — Diagnostics",
+                    (
+                        "Opening Diagnostics or Help writes nothing and performs zero hardware calls.",
+                        "No cooperative cancellation is currently applicable",
+                    ),
+                ),
+            ):
+                app.set_focus(None)
+                await pilot.press(route_key)
+                await pilot.press("?")
+                await wait_until(
+                    pilot,
+                    lambda: app.tui_model.help_open,
+                    f"{heading} did not open",
+                )
+                detail = str(app.query_one("#detail", Static).render())
+                self.assertIn(heading, detail)
+                for text_value in required:
+                    self.assertIn(text_value, detail)
+                self.assertEqual(facade.calls, [])
+                await pilot.press("escape")
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertIs(app.tui_model.route, Route.HOME)
+
+    async def test_review_and_confirmation_help_preserve_write_and_cancel_truth(self):
+        facade = HarnessFacade()
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.set_focus(None)
+            await pilot.press("c")
+            await focus_id(pilot, app, "config-path")
+            for character in "x.json":
+                await pilot.press(character)
+            await focus_id(pilot, app, "apply")
+            await pilot.press("enter")
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.route is Route.REVIEW,
+                "review did not open",
+            )
+
+            calls_before_help = list(facade.calls)
+            app.action_help()
+            await pilot.pause()
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("HELP — Review", detail)
+            self.assertIn("preparation/review has not written persistent state", detail)
+            self.assertIn("Cooperative cancellation is currently available.", detail)
+            self.assertEqual(facade.calls, calls_before_help)
+            app.action_help()
+
+            await focus_id(pilot, app, "review-ack")
+            await pilot.press("space")
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.route is Route.CONFIRMATION,
+                "confirmation did not open",
+            )
+            calls_before_help = list(facade.calls)
+            app.action_help()
+            await pilot.pause()
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("HELP — Confirmation", detail)
+            self.assertIn("Nothing has been written yet.", detail)
+            self.assertIn("Cooperative cancellation is currently available.", detail)
+            self.assertEqual(facade.calls, calls_before_help)
+            app.action_help()
+            app.action_cancel_or_back()
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.active is None,
+                "prepared operation did not cancel",
+            )
+
+    async def test_active_prewrite_help_reports_no_write_and_current_cancellation_without_calls(self):
+        facade = HarnessFacade(execute_mode="cancel-before-write")
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self._keyboard_prepare_to_confirmation(app, pilot)
+            await pilot.press("enter")
+            await wait_thread_event(
+                facade.phase_events[PersistentPhase.REVALIDATING],
+                "persistent worker never reached REVALIDATING",
+            )
+            await pilot.pause()
+            calls_before_help = list(facade.calls)
+            app.action_help()
+            await pilot.pause()
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("HELP — Active operation", detail)
+            self.assertIn(
+                "Persistent writing has not been reported as started.",
+                detail,
+            )
+            self.assertIn("Cooperative cancellation is currently available.", detail)
+            self.assertEqual(facade.calls, calls_before_help)
+            app.action_help()
+            app.action_cancel_or_back()
+            await wait_thread_event(
+                facade.cancel_seen,
+                "cooperative cancellation did not reach the application token",
+            )
+            facade.release.set()
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.terminal is not None,
+                "pre-write cancellation did not settle",
+            )
+
+    async def test_terminal_result_help_exposes_independent_lifecycle_facts_without_calls(self):
+        facade = HarnessFacade(execute_mode="failure-after-reconciliation")
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self._keyboard_prepare_to_confirmation(app, pilot)
+            await pilot.press("enter")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.tui_model.active is None
+                    and app.tui_model.terminal is not None
+                ),
+                "authoritative terminal failure did not settle",
+            )
+            terminal = app.tui_model.terminal
+            self.assertTrue(terminal.writing_started)
+            self.assertTrue(terminal.reconciliation_completed)
+            self.assertFalse(terminal.post_validation_completed)
+
+            calls_before_help = list(facade.calls)
+            app.action_help()
+            await pilot.pause()
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("HELP — Result", detail)
+            self.assertIn("Persistent writing started: Yes.", detail)
+            self.assertIn("Readback reconciliation completed: Yes.", detail)
+            self.assertIn("Post-write validation completed: No.", detail)
+            self.assertIn(
+                "Cooperative cancellation is no longer applicable because the operation is terminal.",
+                detail,
+            )
+            self.assertEqual(facade.calls, calls_before_help)
+
     async def test_large_terminal_uses_expanded_presentation_without_extra_calls(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
@@ -749,16 +936,24 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await focus_id(pilot, app, "persistent-confirm")
-        operation_id = app.tui_model.active.operation_id
-        app._accept_event(
-            ConfirmationChanged(operation_id, "APPLY CONFIG")
+        for character in "APPLY CONFIG":
+            await pilot.press("space" if character == " " else character)
+        await wait_until(
+            pilot,
+            lambda: (
+                app.query_one("#persistent-confirm", Input).value == "APPLY CONFIG"
+                and app.tui_model.confirmation_input == "APPLY CONFIG"
+            ),
+            "real keyboard confirmation did not reach widget and model",
         )
-        await pilot.pause()
+        self.assertEqual(
+            app.query_one("#persistent-confirm", Input).value,
+            "APPLY CONFIG",
+        )
         self.assertEqual(
             app.tui_model.confirmation_input,
             "APPLY CONFIG",
         )
-        await focus_id(pilot, app, "persistent-confirm")
         self.assertEqual(app.focused.id, "persistent-confirm")
     async def test_keyboard_only_prepare_review_exact_confirm_success(self):
         facade = HarnessFacade()
@@ -766,22 +961,29 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
 
-            # Exercise Textual's exact priority-key resolver for Enter. This
-            # is the same binding path App.on_event uses for a real terminal
-            # key before forwarding to the focused widget, without relying on
-            # HeadlessDriver/Pilot scheduling.
-            handled = await app._check_bindings(
-                "enter", priority=True
-            )
-            self.assertTrue(handled)
-            await wait_thread_event(
-                facade.phase_events[PersistentPhase.POST_VALIDATING],
-                "Enter binding did not drive the operation through post-validation",
-                timeout=10.0,
-            )
-            await pilot.pause()
+            with patch.object(
+                app, "_dispatch_effect", wraps=app._dispatch_effect
+            ) as dispatch_effect:
+                await pilot.press("enter")
+                await wait_thread_event(
+                    facade.phase_events[PersistentPhase.POST_VALIDATING],
+                    "real keyboard Enter did not drive the operation through post-validation",
+                    timeout=10.0,
+                )
+                await pilot.pause()
 
+            execute_effects = [
+                call.args[0]
+                for call in dispatch_effect.call_args_list
+                if call.args
+                and isinstance(call.args[0], ExecutePreparedOperation)
+            ]
+            self.assertEqual(len(execute_effects), 1)
             self.assertEqual(facade.execute_calls, 1)
+            self.assertEqual(
+                sum(call[0] == "execute_prepared" for call in facade.calls),
+                1,
+            )
             self.assertIsNotNone(app.tui_model.terminal)
             self.assertEqual(app.tui_model.terminal.outcome.value, "success")
             detail = str(app.query_one("#detail", Static).render())
@@ -877,6 +1079,15 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
                 "persistent worker never reached WRITING",
             )
             self.assertIs(app.tui_model.active.phase, PersistentPhase.WRITING)
+            calls_before_help = list(facade.calls)
+            app.action_help()
+            await pilot.pause()
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("Persistent writing or verification has begun or may have begun.", detail)
+            self.assertIn("Cooperative cancellation is unavailable.", detail)
+            self.assertIn("Q/Esc do not terminate the active transaction", detail)
+            self.assertEqual(facade.calls, calls_before_help)
+            app.action_help()
             app.action_safe_quit()
             self.assertIsNotNone(app.tui_model.active)
             self.assertTrue(app.tui_model.active.cancellation_deferred)

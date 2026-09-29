@@ -266,15 +266,29 @@ def _primary_lines(model: TuiModel) -> tuple[str, ...]:
     return ()
 
 
+def _read_truth_help_line(read_truth: ReadTruth) -> str:
+    return {
+        ReadTruth.NEVER_READ: "No physical state has been read in this session.",
+        ReadTruth.READING: "An explicit foreground device-state read is in progress.",
+        ReadTruth.READ_OK: "The last explicit device-state read succeeded; this is not live polling.",
+        ReadTruth.READ_FAILED: "The latest explicit device-state read failed; no more specific cause is inferred.",
+    }[read_truth]
+
+
+def _cancellation_help_line(active) -> str:
+    if active is None:
+        return "No cooperative cancellation is currently applicable."
+    return (
+        "Cooperative cancellation is currently available."
+        if active.cancellation_available
+        else "Cooperative cancellation is currently unavailable."
+    )
+
+
 def _help_lines(model: TuiModel) -> tuple[str, ...]:
     active = model.active
+    read_text = _read_truth_help_line(model.read_truth)
     if model.route is Route.HOME:
-        read_text = {
-            ReadTruth.NEVER_READ: "No physical state has been read in this session.",
-            ReadTruth.READING: "An explicit foreground read is in progress.",
-            ReadTruth.READ_OK: "Home shows the last explicit successful read, not live polling.",
-            ReadTruth.READ_FAILED: "The latest explicit read failed; Home does not infer its cause from private text.",
-        }[model.read_truth]
         return (
             "HELP — Home",
             read_text,
@@ -287,34 +301,39 @@ def _help_lines(model: TuiModel) -> tuple[str, ...]:
     if model.route is Route.CONFIGURATION:
         return (
             "HELP — Configuration",
+            read_text,
+            "Opening Configuration does not write persistent state.",
             "Plan is local/read-only with respect to hardware.",
             "Apply uses Prepare -> Review -> Confirm -> execution-time revalidation.",
             "Profile switch remains a volatile mutation with its exact confirmation phrase.",
             "No hidden refresh occurs when this area opens.",
-            "Esc returns to Home when idle; active operation cancellation follows application authority.",
+            "No cooperative cancellation is currently applicable while Configuration is idle.",
         )
     if model.route is Route.BACKUP_RESTORE:
         return (
             "HELP — Backup & Restore",
+            read_text,
             "Only existing Restore backup and Restore baseline operations are exposed.",
             "Backup paths are LOCAL SENSITIVE.",
             "Nothing is written merely by opening this area.",
-            "Esc returns to Home when idle; active operation cancellation follows application authority.",
+            "No cooperative cancellation is currently applicable while Backup & Restore is idle.",
         )
     if model.route is Route.DIAGNOSTICS:
         return (
             "HELP — Diagnostics",
-            "Probe, Validate, Refresh/status and Public report are existing read-oriented tasks.",
-            "Opening Diagnostics or Help performs zero hardware calls.",
+            read_text,
+            "Opening Diagnostics or Help writes nothing and performs zero hardware calls.",
+            "Probe, Validate, Refresh/status and Public report run only when explicitly invoked.",
             "SHAREABLE, LOCAL SENSITIVE and PRIVATE remain distinct privacy surfaces.",
             "Technical details are local presentation, not a facade operation.",
-            "Esc returns to Home when idle.",
+            "No cooperative cancellation is currently applicable while Diagnostics is idle.",
         )
     if model.route is Route.REVIEW:
         return (
             "HELP — Review",
             "This is an immutable prepared intent; preparation/review has not written persistent state.",
             "Acknowledge the exact review before confirmation.",
+            _cancellation_help_line(active),
             "Esc requests cancellation/abandonment only where current application authority allows it.",
         )
     if model.route is Route.CONFIRMATION:
@@ -323,6 +342,7 @@ def _help_lines(model: TuiModel) -> tuple[str, ...]:
             "Nothing has been written yet.",
             "Type exactly the application-supplied phrase; surrounding-whitespace handling is unchanged.",
             "Confirmation triggers execution-time revalidation rather than bypassing safety checks.",
+            _cancellation_help_line(active),
             "Esc requests cancellation before write only where current authority allows it.",
         )
     if model.route is Route.OPERATION and active is not None:
@@ -332,25 +352,47 @@ def _help_lines(model: TuiModel) -> tuple[str, ...]:
                 "Persistent writing or verification has begun or may have begun.",
                 "Cooperative cancellation is unavailable.",
                 "Q/Esc do not terminate the active transaction or fabricate cancellation.",
-                "Await authoritative reconciliation/completion and do not retry an unresolved outcome.",
+                "An unresolved hardware outcome is not a terminal result.",
+                "Keep this process open; await authoritative reconciliation/completion and do not retry an unresolved outcome.",
             )
         return (
             "HELP — Active operation",
             "A foreground operation owns hardware-operation precedence.",
+            "Persistent writing has not been reported as started.",
             "No second hardware operation or Refresh may start.",
-            (
-                "Cooperative cancellation is currently available."
-                if active.cancellation_available
-                else "Cooperative cancellation is currently unavailable."
-            ),
+            _cancellation_help_line(active),
         )
+    if model.route is Route.RESULT:
+        lines = [
+            "HELP — Result",
+            "Review the authoritative result and its privacy-safe primary message.",
+        ]
+        if model.terminal is not None:
+            lines.extend(
+                [
+                    "Persistent writing started: "
+                    + ("Yes." if model.terminal.writing_started else "No."),
+                    "Readback reconciliation completed: "
+                    + ("Yes." if model.terminal.reconciliation_completed else "No."),
+                    "Post-write validation completed: "
+                    + ("Yes." if model.terminal.post_validation_completed else "No."),
+                    "Cooperative cancellation is no longer applicable because the operation is terminal.",
+                ]
+            )
+        else:
+            lines.append("No cooperative cancellation is currently applicable.")
+        lines.extend(
+            [
+                "T opens permitted Technical details.",
+                "Esc returns to Home.",
+            ]
+        )
+        return tuple(lines)
     return (
-        "HELP — Result",
-        "Review the authoritative result and its privacy-safe primary message.",
-        "T opens permitted Technical details.",
-        "Esc returns to Home.",
+        "HELP",
+        read_text,
+        "No cooperative cancellation is currently applicable.",
     )
-
 
 def _technical_lines(
     model: TuiModel,
