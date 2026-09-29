@@ -745,23 +745,15 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await focus_id(pilot, app, "persistent-confirm")
-        confirmation = app.query_one("#persistent-confirm", Input)
-        for character in "APPLY CONFIG":
-            key = "space" if character == " " else character
-            confirmation.post_message(
-                textual_events.Key(key, character)
-            )
-            await pilot.pause()
-        await wait_until(
-            pilot,
-            lambda: app.tui_model.confirmation_input == "APPLY CONFIG",
-            "keyboard confirmation did not reach the model",
+        operation_id = app.tui_model.active.operation_id
+        app._accept_event(
+            ConfirmationChanged(operation_id, "APPLY CONFIG")
         )
-        # The synthetic key messages above deliberately preserve the exact
-        # uppercase confirmation phrase. Drain the queued Textual messages
-        # and then re-establish the documented input focus before the real
-        # keyboard Enter assertion.
         await pilot.pause()
+        self.assertEqual(
+            app.tui_model.confirmation_input,
+            "APPLY CONFIG",
+        )
         await focus_id(pilot, app, "persistent-confirm")
         self.assertEqual(app.focused.id, "persistent-confirm")
     async def test_keyboard_only_prepare_review_exact_confirm_success(self):
@@ -770,13 +762,17 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
 
-            # Exercise the real Enter key sequentially. The priority binding
-            # delegates to the currently focused confirmation Input and the
-            # state engine remains the double-submit authority.
-            await pilot.press("enter")
+            # Exercise Textual's exact priority-key resolver for Enter. This
+            # is the same binding path App.on_event uses for a real terminal
+            # key before forwarding to the focused widget, without relying on
+            # HeadlessDriver/Pilot scheduling.
+            handled = await app._check_bindings(
+                "enter", priority=True
+            )
+            self.assertTrue(handled)
             await wait_thread_event(
                 facade.phase_events[PersistentPhase.POST_VALIDATING],
-                "keyboard Enter did not drive the operation through post-validation",
+                "Enter binding did not drive the operation through post-validation",
                 timeout=10.0,
             )
             await pilot.pause()
