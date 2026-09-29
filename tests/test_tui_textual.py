@@ -28,7 +28,11 @@ from g502x_onboard.application.models import (
     ValidationSnapshot,
     WriteEligibility,
 )
-from g502x_onboard.tui.events import ChangePrivacySurface, ConfirmationSubmitted
+from g502x_onboard.tui.events import (
+    ChangePrivacySurface,
+    ConfirmationChanged,
+    ConfirmationSubmitted,
+)
 from g502x_onboard.tui.model import OperationId, ReadTruth, Route
 
 try:
