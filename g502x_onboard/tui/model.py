@@ -170,6 +170,7 @@ class TuiModel:
     last_error: ApplicationError | None = None
     terminal: TerminalState | None = None
     help_open: bool = False
+    technical_open: bool = False
     disclosure: PresentationPayload | None = None
     transient_notice: PresentationPayload | None = None
 

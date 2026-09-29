@@ -42,6 +42,7 @@ from .events import (
     ReviewAcknowledged,
     SetDisclosure,
     SetHelp,
+    SetTechnicalDetails,
     WorkerTransportFault,
 )
 from .model import (
@@ -61,6 +62,7 @@ Event = (
     Navigate
     | SetHelp
     | SetDisclosure
+    | SetTechnicalDetails
     | ChangePrivacySurface
     | ConfigPathChanged
     | BackupPathChanged
@@ -188,7 +190,25 @@ def update(
     model: TuiModel, event: Event
 ) -> tuple[TuiModel, tuple[Effect, ...]]:
     if isinstance(event, Navigate):
-        return replace(model, route=event.route, focus=event.focus), ()
+        task_routes = {
+            Route.HOME,
+            Route.CONFIGURATION,
+            Route.BACKUP_RESTORE,
+            Route.DIAGNOSTICS,
+        }
+        if (
+            model.active is not None
+            and event.route in task_routes
+            and event.route is not model.route
+        ):
+            return model, ()
+        return replace(
+            model,
+            route=event.route,
+            focus=event.focus,
+            help_open=False,
+            technical_open=False,
+        ), ()
 
     if isinstance(event, SetHelp):
         return replace(
@@ -200,6 +220,13 @@ def update(
     if isinstance(event, SetDisclosure):
         payload = _payload_for_surface(event.payload, model.surface_privacy)
         return replace(model, disclosure=payload), ()
+
+    if isinstance(event, SetTechnicalDetails):
+        return replace(
+            model,
+            technical_open=event.open,
+            help_open=(False if event.open else model.help_open),
+        ), ()
 
     if isinstance(event, ChangePrivacySurface):
         return _clear_disallowed(model, event.privacy), ()

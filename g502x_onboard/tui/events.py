@@ -37,6 +37,11 @@ class SetDisclosure:
 
 
 @dataclass(frozen=True)
+class SetTechnicalDetails:
+    open: bool
+
+
+@dataclass(frozen=True)
 class ChangePrivacySurface:
     privacy: PrivacyClass
 
