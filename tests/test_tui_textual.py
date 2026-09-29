@@ -744,13 +744,23 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await focus_id(pilot, app, "persistent-confirm")
+        confirmation = app.query_one("#persistent-confirm", Input)
         for character in "APPLY CONFIG":
-            await pilot.press("space" if character == " " else character)
+            key = "space" if character == " " else character
+            confirmation.post_message(
+                textual_events.Key(key, character)
+            )
         await wait_until(
             pilot,
             lambda: app.tui_model.confirmation_input == "APPLY CONFIG",
             "keyboard confirmation did not reach the model",
         )
+        # The synthetic key messages above deliberately preserve the exact
+        # uppercase confirmation phrase. Drain the queued Textual messages
+        # and then re-establish the documented input focus before the real
+        # keyboard Enter assertion.
+        await pilot.pause()
+        await focus_id(pilot, app, "persistent-confirm")
         self.assertEqual(app.focused.id, "persistent-confirm")
     async def test_keyboard_only_prepare_review_exact_confirm_success(self):
         facade = HarnessFacade()
