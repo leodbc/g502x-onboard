@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from g502x_onboard.application.models import (
+    ApplicationError,
     ApplyReview,
     CompatibilityObservation,
     ErrorCode,
@@ -27,8 +28,8 @@ from g502x_onboard.application.models import (
     ValidationSnapshot,
     WriteEligibility,
 )
-from g502x_onboard.tui.events import ConfirmationSubmitted
-from g502x_onboard.tui.model import OperationId
+from g502x_onboard.tui.events import ChangePrivacySurface, ConfirmationSubmitted
+from g502x_onboard.tui.model import OperationId, ReadTruth, Route
 
 try:
     from textual import events as textual_events
@@ -90,10 +91,17 @@ def make_prepared(
 
 
 class HarnessFacade:
-    def __init__(self, *, read_only=False, execute_mode="success"):
+    def __init__(
+        self,
+        *,
+        read_only=False,
+        execute_mode="success",
+        status_error=False,
+    ):
         self.calls = []
         self.read_only = read_only
         self.execute_mode = execute_mode
+        self.status_error = status_error
         self.execute_calls = 0
         self.phase_events = {
             phase: Event()
@@ -110,10 +118,20 @@ class HarnessFacade:
 
     def status(self, *, private):
         self.calls.append(("status", private))
+        if self.status_error:
+            error = ApplicationError(
+                ErrorCode.BACKEND_FAILURE,
+                "status failed",
+                PrivacyClass.PRIVATE_DIAGNOSTIC,
+                detail="SECRET G HUB transport firmware",
+            )
+            return OperationResult(
+                ok=False, error=error, privacy=error.privacy
+            )
         value = StatusSnapshot(
             active_profile=1,
-            descriptor={},
-            summary={},
+            descriptor={"raw": "MUST-NOT-BE-RETAINED"},
+            summary={"raw": "MUST-NOT-BE-RETAINED"},
             enabled_profiles=(1, 2),
             privacy=PrivacyClass.SHAREABLE,
         )
@@ -328,6 +346,7 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first, second)
         self.assertNotEqual(first.issuance, second.issuance)
 
+
     async def test_mount_80x24_exposes_semantic_safety_labels(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
@@ -335,10 +354,13 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertFalse(app.query_one("#constrained", Static).display)
             summary = str(app.query_one("#summary", Static).render())
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("G502 X Onboard", summary)
             self.assertIn("Privacy: SHAREABLE", summary)
-            self.assertIn("State: IDLE", summary)
+            self.assertIn("Read: never-read", summary)
+            self.assertIn("[ ] Device state not read yet", detail)
+            self.assertTrue(app.query_one("#home-panel").display)
             self.assertEqual(facade.calls, [])
-
     async def test_below_minimum_is_explicit_and_hides_safety_controls(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
@@ -354,40 +376,36 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facade.calls, [])
             self.assertIsNone(app.tui_model.active)
 
+
     async def test_privacy_downgrade_clears_hidden_sensitive_widget_values(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
-            await focus_id(pilot, app, "config-path")
-            await pilot.press("s", "e", "c", "r", "e", "t")
-            await focus_id(pilot, app, "backup-path")
-            await pilot.press("b", "a", "c", "k", "u", "p")
+            app.set_focus(None)
+            await pilot.press("c")
             await wait_until(
                 pilot,
-                lambda: (
-                    app.query_one("#config-path", Input).value == "secret"
-                    and app.query_one("#backup-path", Input).value == "backup"
-                ),
-                "sensitive widget inputs did not populate",
+                lambda: app.tui_model.route is Route.CONFIGURATION,
+                "Configuration route did not open",
             )
-
-            # The separate below-minimum test exercises Textual's real terminal-size
-            # path. Here force the same hidden-layout branch deterministically so
-            # this privacy regression is not coupled to terminal-resize timing.
+            await focus_id(pilot, app, "config-path")
+            await pilot.press("s", "e", "c", "r", "e", "t")
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.config_path_input == "secret",
+                "sensitive widget input did not populate",
+            )
             with patch.object(app, "_layout_constrained", return_value=True):
                 app._render()
                 self.assertTrue(app.query_one("#constrained", Static).display)
-
-                # LOCAL_SENSITIVE -> PRIVATE_DIAGNOSTIC -> SHAREABLE.
-                app.action_privacy()
-                app.action_privacy()
+                app._accept_event(
+                    ChangePrivacySurface(PrivacyClass.SHAREABLE)
+                )
                 await pilot.pause()
 
             self.assertIs(app.tui_model.surface_privacy, PrivacyClass.SHAREABLE)
             self.assertEqual(app.tui_model.config_path_input, "")
-            self.assertEqual(app.tui_model.backup_path_input, "")
             self.assertEqual(app.query_one("#config-path", Input).value, "")
-            self.assertEqual(app.query_one("#backup-path", Input).value, "")
             self.assertIsNone(app.tui_model.disclosure)
 
     async def test_idle_navigation_help_focus_resize_do_not_poll_then_refresh_once(self):
@@ -395,10 +413,20 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
-            await pilot.press("h")
-            await pilot.press("h")
-            await pilot.press("tab", "tab", "tab")
-            await pilot.resize_terminal(100, 30)
+            app.set_focus(None)
+            await pilot.press("?")
+            await wait_until(
+                pilot, lambda: app.tui_model.help_open, "Help did not open"
+            )
+            self.assertEqual(facade.calls, [])
+            await pilot.press("escape")
+            await pilot.press("c")
+            await pilot.press("escape")
+            await pilot.press("b")
+            await pilot.press("escape")
+            await pilot.press("d")
+            await pilot.press("escape")
+            await pilot.resize_terminal(110, 30)
             await pilot.resize_terminal(80, 24)
             await pilot.pause()
             self.assertEqual(facade.calls, [])
@@ -407,33 +435,45 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("r")
             await wait_until(
                 pilot,
-                lambda: facade.calls == [("status", False)],
-                "explicit refresh did not produce exactly one status call",
+                lambda: (
+                    facade.calls == [("status", False)]
+                    and app.tui_model.active is None
+                    and app.tui_model.read_truth is ReadTruth.READ_OK
+                ),
+                "explicit refresh did not settle as exactly one typed status read",
             )
+            self.assertIs(app.tui_model.route, Route.HOME)
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("[OK] State read successfully", detail)
+            self.assertIn("Profile 1", detail)
+            self.assertNotIn("MUST-NOT-BE-RETAINED", str(app.tui_model))
 
     async def test_read_only_probe_disables_mutating_actions_with_visible_reason(self):
         facade = HarnessFacade(read_only=True)
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             app.set_focus(None)
+            await pilot.press("d")
             await pilot.press("p")
             await wait_until(
                 pilot,
                 lambda: app.tui_model.read_only and app.tui_model.active is None,
                 "read-only probe did not settle",
             )
-            self.assertTrue(app.query_one("#apply", Button).disabled)
-            self.assertTrue(app.query_one("#profile-switch", Button).disabled)
+            self.assertEqual(facade.calls, [("probe",)])
             detail = str(app.query_one("#detail", Static).render())
-            self.assertIn("READ ONLY", detail)
             self.assertIn("Read-only reason", detail)
 
-            calls_before_shortcuts = list(facade.calls)
-            app.set_focus(None)
-            await pilot.press("l", "s", "a", "b")
+            await pilot.press("escape")
+            await pilot.press("c")
             await pilot.pause()
-            self.assertEqual(facade.calls, calls_before_shortcuts)
-            self.assertIsNone(app.tui_model.active)
+            self.assertTrue(app.query_one("#apply", Button).disabled)
+            self.assertTrue(app.query_one("#profile-switch", Button).disabled)
+            calls_before = list(facade.calls)
+            app.set_focus(None)
+            await pilot.press("a", "s")
+            await pilot.pause()
+            self.assertEqual(facade.calls, calls_before)
 
     async def test_no_color_keeps_semantics_in_text(self):
         facade = HarnessFacade(read_only=True)
@@ -441,61 +481,67 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             app = G502XTuiApp(facade=facade)
             async with app.run_test(size=(80, 24)) as pilot:
                 app.set_focus(None)
-                await pilot.press("p")
+                await pilot.press("d", "p")
                 await wait_until(
                     pilot,
                     lambda: app.tui_model.read_only and app.tui_model.active is None,
                     "NO_COLOR probe did not settle",
                 )
                 summary = str(app.query_one("#summary", Static).render())
-                self.assertIn("NO_COLOR: semantic labels active", summary)
-                self.assertIn("READ ONLY", summary)
-
+                detail = str(app.query_one("#detail", Static).render())
+                self.assertIn("NO_COLOR: text/markers carry semantic state", summary)
+                self.assertIn("[!] READ ONLY", summary)
+                self.assertIn("Read-only reason", detail)
 
     async def test_focused_text_input_consumes_letter_shortcuts_without_dispatch(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
-            await focus_id(pilot, app, "config-path")
-            await pilot.press("a", "p", "p", "l", "y", "q", "g", "r", "v", "n", "s", "b", "d", "h")
+            app.set_focus(None)
+            await pilot.press("c")
             await wait_until(
                 pilot,
-                lambda: app.tui_model.config_path_input == "applyqgrvnsbdh",
+                lambda: app.tui_model.route is Route.CONFIGURATION,
+                "Configuration did not open",
+            )
+            await focus_id(pilot, app, "config-path")
+            for key in ("a", "p", "p", "l", "y", "q", "g", "r", "v", "n", "s", "b", "d", "c", "?"):
+                await pilot.press(key)
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.config_path_input == "applyqgrvnsbdc?",
                 "focused Input did not consume printable shortcut letters",
             )
             self.assertEqual(facade.calls, [])
             self.assertIsNone(app.tui_model.active)
+            self.assertIs(app.tui_model.route, Route.CONFIGURATION)
 
     async def test_keyboard_shortcuts_cover_all_remaining_operation_entrypoints(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
-            async def press_and_wait(key, call_name):
-                app.set_focus(None)
-                await pilot.press(key)
+            async def settle(call_name):
                 await wait_until(
                     pilot,
                     lambda: (
                         any(call[0] == call_name for call in facade.calls)
                         and app.tui_model.active is None
                     ),
-                    f"{key} did not complete {call_name}",
+                    f"{call_name} did not settle",
                 )
 
-            await press_and_wait("p", "probe")
-            await press_and_wait("r", "status")
-            await press_and_wait("v", "validate")
-
+            app.set_focus(None)
+            await pilot.press("c")
             await focus_id(pilot, app, "config-path")
-            await pilot.press("x", ".", "j", "s", "o", "n")
-            await wait_until(
-                pilot,
-                lambda: app.tui_model.config_path_input == "x.json",
-                "plan path did not reach model",
-            )
-            await press_and_wait("n", "plan")
-            await press_and_wait("g", "report_probe")
+            for character in "x.json":
+                await pilot.press(character)
+            app.set_focus(None)
+            await pilot.press("n")
+            await settle("plan")
+            await pilot.press("escape")
 
+            app.set_focus(None)
+            await pilot.press("c")
             await focus_id(pilot, app, "profile-target")
             await pilot.press("backspace", "2")
             await focus_id(pilot, app, "profile-confirmation")
@@ -507,35 +553,16 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
                 )
             await wait_until(
                 pilot,
-                lambda: (
-                    app.tui_model.profile_target_input == "2"
-                    and app.tui_model.profile_confirmation_input == "ENTER PROFILE 2"
-                ),
-                "profile keyboard inputs did not reach model",
+                lambda: app.tui_model.profile_confirmation_input == "ENTER PROFILE 2",
+                "profile confirmation did not reach model",
             )
-            await press_and_wait("s", "switch_profile")
-
-            # Each persistent shortcut must reach the canonical preparation path.
-            # Esc then abandons the prepared capability without executing it.
-            await focus_id(pilot, app, "config-path")
-            await pilot.press("x", ".", "j", "s", "o", "n")
             app.set_focus(None)
-            await pilot.press("a")
-            await wait_until(
-                pilot,
-                lambda: (
-                    app.tui_model.prepared is not None
-                    and any(call[0] == "prepare_apply" for call in facade.calls)
-                ),
-                "a did not prepare apply",
-            )
+            await pilot.press("s")
+            await settle("switch_profile")
             await pilot.press("escape")
-            await wait_until(
-                pilot,
-                lambda: app.tui_model.active is None,
-                "Esc did not abandon apply preparation",
-            )
 
+            app.set_focus(None)
+            await pilot.press("b")
             await focus_id(pilot, app, "backup-path")
             for character in "backup.bin":
                 await pilot.press(character)
@@ -545,66 +572,152 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
                 pilot,
                 lambda: (
                     app.tui_model.prepared is not None
-                    and any(
-                        call[0] == "prepare_restore_backup"
-                        for call in facade.calls
-                    )
+                    and any(call[0] == "prepare_restore_backup" for call in facade.calls)
                 ),
-                "b did not prepare backup restore",
+                "backup restore did not prepare",
             )
             await pilot.press("escape")
-            await wait_until(
-                pilot,
-                lambda: app.tui_model.active is None,
-                "Esc did not abandon backup preparation",
-            )
+            await wait_until(pilot, lambda: app.tui_model.active is None, "backup prepare did not cancel")
 
             app.set_focus(None)
-            await pilot.press("l")
+            await pilot.press("b", "l")
             await wait_until(
                 pilot,
                 lambda: (
                     app.tui_model.prepared is not None
-                    and any(
-                        call[0] == "prepare_restore_baseline"
-                        for call in facade.calls
-                    )
+                    and any(call[0] == "prepare_restore_baseline" for call in facade.calls)
                 ),
-                "l did not prepare baseline restore",
+                "baseline restore did not prepare",
             )
             await pilot.press("escape")
-            await wait_until(
-                pilot,
-                lambda: app.tui_model.active is None,
-                "Esc did not abandon baseline preparation",
-            )
+            await wait_until(pilot, lambda: app.tui_model.active is None, "baseline prepare did not cancel")
 
-            calls_before_local_ui = len(facade.calls)
-            app.set_focus(None)
-            await pilot.press("h")
-            await pilot.press("h")
-            await pilot.press("d")
-            await pilot.press("d")
-            await pilot.pause()
-            self.assertEqual(len(facade.calls), calls_before_local_ui)
+            for key, call_name in (("p", "probe"), ("v", "validate"), ("g", "report_probe")):
+                app.set_focus(None)
+                await pilot.press("d", key)
+                await settle(call_name)
+                await pilot.press("escape")
 
             call_names = [call[0] for call in facade.calls]
             for expected in (
-                "probe",
-                "status",
-                "validate",
                 "plan",
-                "report_probe",
                 "switch_profile",
-                "prepare_apply",
                 "prepare_restore_backup",
                 "prepare_restore_baseline",
+                "probe",
+                "validate",
+                "report_probe",
             ):
                 self.assertIn(expected, call_names)
 
+
+    async def test_refresh_failure_returns_generic_failed_read_home(self):
+        facade = HarnessFacade(status_error=True)
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.set_focus(None)
+            await pilot.press("r")
+            await wait_until(
+                pilot,
+                lambda: (
+                    app.tui_model.active is None
+                    and app.tui_model.read_truth is ReadTruth.READ_FAILED
+                ),
+                "failed refresh did not settle",
+            )
+            self.assertEqual(facade.calls, [("status", False)])
+            self.assertIs(app.tui_model.route, Route.HOME)
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("[X] Device state could not be read", detail)
+            self.assertNotIn("SECRET", detail)
+            self.assertNotIn("G HUB", detail)
+
+    async def test_hidden_route_shortcuts_do_not_dispatch(self):
+        facade = HarnessFacade()
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.set_focus(None)
+            await pilot.press("n", "a", "s", "l", "p", "v", "g")
+            await pilot.pause()
+            self.assertEqual(facade.calls, [])
+            self.assertIs(app.tui_model.route, Route.HOME)
+
+            await pilot.press("c")
+            await pilot.press("p", "v", "g", "l")
+            await pilot.pause()
+            self.assertEqual(facade.calls, [])
+
+    async def test_contextual_help_and_technical_details_are_local_only(self):
+        facade = HarnessFacade()
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.set_focus(None)
+            await pilot.press("?")
+            await wait_until(pilot, lambda: app.tui_model.help_open, "Help did not open")
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("HELP — Home", detail)
+            self.assertIn("last explicit", detail.lower())
+            self.assertEqual(facade.calls, [])
+            await pilot.press("escape")
+            await pilot.press("t")
+            await wait_until(
+                pilot, lambda: app.tui_model.technical_open, "Technical details did not open"
+            )
+            detail = str(app.query_one("#detail", Static).render())
+            self.assertIn("TECHNICAL DETAILS", detail)
+            self.assertIn("Read truth: never-read", detail)
+            self.assertEqual(facade.calls, [])
+
+    async def test_large_terminal_uses_expanded_presentation_without_extra_calls(self):
+        facade = HarnessFacade()
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(120, 35)) as pilot:
+            await pilot.pause()
+            self.assertTrue(app.query_one("#main").has_class("expanded"))
+            self.assertTrue(app.query_one("#home-panel").display)
+            self.assertEqual(facade.calls, [])
+
+    async def test_constrained_writing_keeps_non_cancellable_truth_visible(self):
+        facade = HarnessFacade(execute_mode="block-writing")
+        app = G502XTuiApp(facade=facade)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self._keyboard_prepare_to_confirmation(app, pilot)
+            operation_id = app.tui_model.active.operation_id
+            app._accept_event(ConfirmationSubmitted(operation_id))
+            await wait_thread_event(
+                facade.phase_events[PersistentPhase.WRITING],
+                "persistent worker never reached WRITING",
+            )
+            await pilot.pause()
+            with patch.object(app, "_layout_constrained", return_value=True):
+                app._render()
+                constrained = str(app.query_one("#constrained", Static).render())
+                self.assertIn("Writing/verification is still in progress", constrained)
+                self.assertIn("Cancellation is unavailable", constrained)
+                self.assertIn("Keep this process open", constrained)
+                app.set_focus(None)
+                await pilot.press("q")
+                await pilot.pause()
+                self.assertIsNotNone(app.tui_model.active)
+                self.assertTrue(app.tui_model.active.cancellation_deferred)
+            facade.release.set()
+            await pilot.pause()
+
     async def _keyboard_prepare_to_confirmation(self, app, pilot):
+        if app.tui_model.route is Route.HOME:
+            app.set_focus(None)
+            await pilot.press("c")
+            await wait_until(
+                pilot,
+                lambda: app.tui_model.route is Route.CONFIGURATION,
+                "Configuration did not open",
+            )
         await focus_id(pilot, app, "config-path")
-        await pilot.press("x", ".", "j", "s", "o", "n")
+        current = app.query_one("#config-path", Input).value
+        if current:
+            await pilot.press(*(["backspace"] * len(current)))
+        for character in "x.json":
+            await pilot.press(character)
         await wait_until(
             pilot,
             lambda: app.tui_model.config_path_input == "x.json",
@@ -640,7 +753,6 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             lambda: app.tui_model.confirmation_input == "APPLY CONFIG",
             "keyboard confirmation did not reach the model",
         )
-
     async def test_keyboard_only_prepare_review_exact_confirm_success(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)

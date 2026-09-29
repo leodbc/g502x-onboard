@@ -262,5 +262,20 @@ print("CORE_CLI_IMPORT_OK")
             self.assertTrue(names.isdisjoint(forbidden), (effect_type.__name__, names))
 
 
+    def test_typed_home_projection_retains_no_raw_application_dicts(self):
+        from dataclasses import fields
+        from g502x_onboard.tui.model import ReadProjection
+
+        names = {field.name for field in fields(ReadProjection)}
+        self.assertTrue(
+            names.isdisjoint(
+                {"descriptor", "summary", "detail", "payload", "exception"}
+            )
+        )
+        runner_source = (TUI / "runner.py").read_text(encoding="utf-8")
+        self.assertNotIn("value.descriptor", runner_source)
+        self.assertNotIn("value.summary", runner_source)
+
+
 if __name__ == "__main__":
     unittest.main()

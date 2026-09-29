@@ -152,7 +152,7 @@ class G502XTuiApp(App[None]):
     }
 
     #diagnostics-panel {
-        height: 3;
+        height: 4;
     }
 
     #utility-row {
@@ -582,15 +582,15 @@ class G502XTuiApp(App[None]):
     def _constrained_text(self) -> str:
         active = self._model.active
         if active is None:
-            return (
+            text = (
                 "G502 X Onboard\n\n"
                 "[X] Terminal is smaller than the supported 80x24 minimum.\n\n"
                 "Enlarge the terminal to use device and configuration actions.\n"
                 "No hardware action is available in this layout.\n\n"
                 "? Help   Q Exit"
             )
-        if active.non_cancellable or active.worker_fault_unresolved:
-            return (
+        elif active.non_cancellable or active.worker_fault_unresolved:
+            text = (
                 "G502 X Onboard\n\n"
                 "[>] Writing/verification is still in progress\n"
                 "[!] Cancellation is unavailable\n\n"
@@ -598,17 +598,21 @@ class G502XTuiApp(App[None]):
                 "No new hardware action is available.\n\n"
                 "? Help"
             )
-        return (
-            "G502 X Onboard\n\n"
-            f"[>] {active.action.value.replace('-', ' ').title()} is still active\n"
-            "[ ] Persistent writing has not been reported as started.\n"
-            + (
-                "Cooperative cancellation is available.\n"
-                if active.cancellation_available
-                else "Cooperative cancellation is unavailable.\n"
+        else:
+            text = (
+                "G502 X Onboard\n\n"
+                f"[>] {active.action.value.replace('-', ' ').title()} is still active\n"
+                "[ ] Persistent writing has not been reported as started.\n"
+                + (
+                    "Cooperative cancellation is available.\n"
+                    if active.cancellation_available
+                    else "Cooperative cancellation is unavailable.\n"
+                )
+                + "\nEnlarge the terminal for full detail.\n? Help   Esc Cancel/back"
             )
-            + "\nEnlarge the terminal for full detail.\n? Help   Esc Cancel/back"
-        )
+        if self._model.help_open:
+            text += "\n\n" + "\n".join(view(self._model).help_lines)
+        return text
 
     def _render(self) -> None:
         if not self.is_mounted:
