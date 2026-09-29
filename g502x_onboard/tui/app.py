@@ -73,6 +73,7 @@ class G502XTuiApp(App[None]):
         Binding("g", "report", "Public report"),
         Binding("t", "technical", "Technical details"),
         Binding("question_mark", "help", "Help"),
+        Binding("enter", "activate_focused", "Select", show=False, priority=True),
         Binding("escape", "cancel_or_back", "Cancel/back", show=False, priority=True),
         Binding("q", "safe_quit", "Quit"),
         Binding("ctrl+q", "safe_quit", "Safe quit", show=False, priority=True),
@@ -451,6 +452,39 @@ class G502XTuiApp(App[None]):
 
     def action_help(self) -> None:
         self._accept_event(SetHelp(not self._model.help_open))
+
+    def action_activate_focused(self) -> None:
+        """Preserve focused-control Enter semantics under the task shell."""
+        focused = self.focused
+        if (
+            focused is None
+            or getattr(focused, "disabled", False)
+            or not getattr(focused, "display", True)
+        ):
+            return
+
+        if isinstance(focused, Input):
+            input_id = focused.id
+            if input_id == "config-path":
+                self.action_plan()
+            elif input_id == "backup-path":
+                self.action_restore_backup()
+            elif input_id == "profile-confirmation":
+                self.action_profile_switch()
+            elif input_id == "persistent-confirm":
+                active = self._model.active
+                if active is not None:
+                    self._accept_event(
+                        ConfirmationSubmitted(active.operation_id)
+                    )
+            return
+
+        if isinstance(focused, Checkbox):
+            focused.toggle()
+            return
+
+        if isinstance(focused, Button):
+            focused.press()
 
     def action_technical(self) -> None:
         self._accept_event(

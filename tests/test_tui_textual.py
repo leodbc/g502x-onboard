@@ -328,6 +328,7 @@ async def focus_id(pilot, app, target: str, limit: int = 50):
 class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
     async def test_safety_key_bindings_are_priority(self):
         bindings = {binding.key: binding for binding in G502XTuiApp.BINDINGS}
+        self.assertTrue(bindings["enter"].priority)
         self.assertTrue(bindings["escape"].priority)
         self.assertTrue(bindings["ctrl+q"].priority)
 
