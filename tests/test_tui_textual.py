@@ -656,7 +656,7 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
             await wait_until(pilot, lambda: app.tui_model.help_open, "Help did not open")
             detail = str(app.query_one("#detail", Static).render())
             self.assertIn("HELP — Home", detail)
-            self.assertIn("last explicit", detail.lower())
+            self.assertIn("no physical state", detail.lower())
             self.assertEqual(facade.calls, [])
             await pilot.press("escape")
             await pilot.press("t")
@@ -758,6 +758,12 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         app = G502XTuiApp(facade=facade)
         async with app.run_test(size=(80, 24)) as pilot:
             await self._keyboard_prepare_to_confirmation(app, pilot)
+
+            # Direct Key posting above exercises exact text entry without
+            # depending on terminal handling of spaces. Re-establish explicit
+            # keyboard focus before testing the real Enter submit contract.
+            await focus_id(pilot, app, "persistent-confirm")
+            self.assertEqual(app.focused.id, "persistent-confirm")
 
             # Keep the submit itself as a real keyboard Enter. Run it as a task
             # so the test can observe the synchronous facade worker phases
