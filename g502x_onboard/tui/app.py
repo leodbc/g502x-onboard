@@ -29,6 +29,7 @@ from .events import (
     ReviewAcknowledged,
     SetDisclosure,
     SetHelp,
+    SetTechnicalDetails,
 )
 from .model import (
     OperationAction,
@@ -50,24 +51,29 @@ def _default_operation_id() -> OperationId:
 
 
 class G502XTuiApp(App[None]):
-    """Thin Textual renderer/worker adapter around the pure TUI state engine."""
+    """Task-oriented Textual presentation over the existing pure state engine."""
 
     TITLE = "G502 X Onboard"
-    SUB_TITLE = "optional Textual adapter"
+    SUB_TITLE = "Phase 7 presentation"
     MINIMUM_SIZE = (80, 24)
 
     BINDINGS = [
-        Binding("p", "probe", "Probe"),
+        Binding("up", "focus_previous", "Previous", show=False),
+        Binding("down", "focus_next", "Next", show=False),
+        Binding("c", "configuration", "Configuration"),
+        Binding("b", "backup_context", "Backup & Restore"),
+        Binding("d", "diagnostics", "Diagnostics"),
         Binding("r", "refresh", "Refresh"),
-        Binding("v", "validate", "Validate"),
         Binding("n", "plan", "Plan"),
         Binding("a", "apply", "Apply"),
-        Binding("b", "restore_backup", "Restore backup"),
-        Binding("l", "restore_baseline", "Restore baseline"),
         Binding("s", "profile_switch", "Switch profile"),
+        Binding("l", "restore_baseline", "Restore baseline"),
+        Binding("p", "probe", "Probe"),
+        Binding("v", "validate", "Validate"),
         Binding("g", "report", "Public report"),
-        Binding("h", "help", "Help"),
-        Binding("d", "privacy", "Privacy"),
+        Binding("t", "technical", "Technical details"),
+        Binding("question_mark", "help", "Help"),
+        Binding("enter", "activate_focused", "Select", show=False, priority=True),
         Binding("escape", "cancel_or_back", "Cancel/back", show=False, priority=True),
         Binding("q", "safe_quit", "Quit"),
         Binding("ctrl+q", "safe_quit", "Safe quit", show=False, priority=True),
@@ -94,13 +100,68 @@ class G502XTuiApp(App[None]):
         padding: 0 1;
     }
 
-    #action-grid {
+    #workspace {
+        height: 1fr;
+        layout: vertical;
+    }
+
+    #task-area {
+        height: auto;
+        max-height: 10;
+        padding: 0 1;
+    }
+
+    #main.expanded #workspace {
+        layout: horizontal;
+    }
+
+    #main.expanded #task-area {
+        width: 1fr;
+        height: 1fr;
+        max-height: 100%;
+    }
+
+    #main.expanded #detail-scroll {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    #home-panel, #configuration-panel, #backup-panel, #diagnostics-panel {
+        display: none;
+        height: auto;
+    }
+
+    .action-row {
         layout: grid;
-        grid-size: 3 3;
-        grid-columns: 1fr 1fr 1fr;
-        grid-rows: 1 1 1;
+        grid-size: 2 2;
+        grid-columns: 1fr 1fr;
+        grid-rows: 1 1;
+        height: 2;
         grid-gutter: 0 1;
-        height: 3;
+    }
+
+    #home-panel {
+        height: 4;
+    }
+
+    #configuration-panel {
+        height: 8;
+    }
+
+    #backup-panel {
+        height: 4;
+    }
+
+    #diagnostics-panel {
+        height: 4;
+    }
+
+    #utility-row {
+        layout: grid;
+        grid-size: 2 1;
+        grid-columns: 1fr 1fr;
+        height: 1;
+        grid-gutter: 0 1;
     }
 
     Button {
@@ -108,10 +169,6 @@ class G502XTuiApp(App[None]):
         min-width: 10;
         border: none;
         padding: 0 1;
-    }
-
-    #input-panel {
-        height: 4;
     }
 
     Input {
@@ -157,60 +214,63 @@ class G502XTuiApp(App[None]):
         return self._model
 
     def compose(self) -> ComposeResult:
-        yield Static(
-            "Terminal size is below the supported 80x24 minimum. "
-            "Safety-critical controls are disabled until the terminal is enlarged.",
-            id="constrained",
-            markup=False,
-        )
+        yield Static("", id="constrained", markup=False)
         with Vertical(id="main"):
             yield Static("", id="summary", markup=False)
-            with Grid(id="action-grid"):
-                yield Button("Probe [p]", id="probe")
-                yield Button("Refresh/status [r]", id="refresh")
-                yield Button("Validate [v]", id="validate")
-                yield Button("Plan [n]", id="plan")
-                yield Button("Prepare apply [a]", id="apply")
-                yield Button("Restore backup [b]", id="restore-backup")
-                yield Button("Restore baseline [l]", id="restore-baseline")
-                yield Button("Switch profile [s]", id="profile-switch")
-                yield Button("Public report [g]", id="report")
-            with Vertical(id="input-panel"):
-                yield Input(
-                    placeholder="Config path — LOCAL SENSITIVE",
-                    id="config-path",
-                )
-                yield Input(
-                    placeholder="Backup path — LOCAL SENSITIVE",
-                    id="backup-path",
-                )
-                yield Input(
-                    value="1",
-                    placeholder="Profile target: 1..5",
-                    id="profile-target",
-                )
-                yield Input(
-                    placeholder="Exact profile confirmation",
-                    id="profile-confirmation",
-                )
-            with VerticalScroll(id="detail-scroll"):
-                yield Static("", id="detail", markup=False)
-                yield Checkbox(
-                    "I reviewed this exact prepared operation",
-                    id="review-ack",
-                )
-                yield Input(
-                    placeholder="Exact persistent confirmation",
-                    id="persistent-confirm",
-                )
-                yield Button(
-                    "Execute prepared operation",
-                    id="execute",
-                )
-                yield Button(
-                    "Request cooperative cancellation",
-                    id="cancel",
-                )
+            with Grid(id="workspace"):
+                with Vertical(id="task-area"):
+                    with Vertical(id="home-panel"):
+                        yield Button("Read current onboard state [R]", id="refresh")
+                        yield Button("Configuration [C]", id="nav-config")
+                        yield Button("Backup & Restore [B]", id="nav-backup")
+                        yield Button("Diagnostics [D]", id="nav-diagnostics")
+                    with Vertical(id="configuration-panel"):
+                        yield Input(
+                            placeholder="Config path — LOCAL SENSITIVE",
+                            id="config-path",
+                        )
+                        yield Button("Plan configuration [N]", id="plan")
+                        yield Button("Prepare apply [A]", id="apply")
+                        yield Input(
+                            value="1",
+                            placeholder="Profile target: 1..5",
+                            id="profile-target",
+                        )
+                        yield Input(
+                            placeholder="Exact profile confirmation",
+                            id="profile-confirmation",
+                        )
+                        yield Button("Switch active profile [S]", id="profile-switch")
+                    with Vertical(id="backup-panel"):
+                        yield Input(
+                            placeholder="Backup path — LOCAL SENSITIVE",
+                            id="backup-path",
+                        )
+                        yield Button("Restore backup [B]", id="restore-backup")
+                        yield Button("Restore baseline [L]", id="restore-baseline")
+                    with Vertical(id="diagnostics-panel"):
+                        yield Button("Probe [P]", id="probe")
+                        yield Button("Validate [V]", id="validate")
+                        yield Button("Public report [G]", id="report")
+                        yield Button("Privacy surface", id="privacy")
+                    with Grid(id="utility-row"):
+                        yield Button("Technical details [T]", id="technical")
+                        yield Button("Help [?]", id="help")
+                with VerticalScroll(id="detail-scroll"):
+                    yield Static("", id="detail", markup=False)
+                    yield Checkbox(
+                        "I reviewed this exact prepared operation",
+                        id="review-ack",
+                    )
+                    yield Input(
+                        placeholder="Exact persistent confirmation",
+                        id="persistent-confirm",
+                    )
+                    yield Button("Execute prepared operation", id="execute")
+                    yield Button(
+                        "Request cooperative cancellation",
+                        id="cancel",
+                    )
 
     def on_mount(self) -> None:
         self._render()
@@ -220,10 +280,16 @@ class G502XTuiApp(App[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
-        if button_id == "probe":
-            self.action_probe()
-        elif button_id == "refresh":
+        if button_id == "refresh":
             self.action_refresh()
+        elif button_id == "nav-config":
+            self.action_configuration()
+        elif button_id == "nav-backup":
+            self._navigate_task(Route.BACKUP_RESTORE)
+        elif button_id == "nav-diagnostics":
+            self.action_diagnostics()
+        elif button_id == "probe":
+            self.action_probe()
         elif button_id == "validate":
             self.action_validate()
         elif button_id == "plan":
@@ -238,6 +304,12 @@ class G502XTuiApp(App[None]):
             self.action_profile_switch()
         elif button_id == "report":
             self.action_report()
+        elif button_id == "privacy":
+            self.action_privacy()
+        elif button_id == "technical":
+            self.action_technical()
+        elif button_id == "help":
+            self.action_help()
         elif button_id == "execute":
             active = self._model.active
             if active is not None:
@@ -286,9 +358,7 @@ class G502XTuiApp(App[None]):
         if active is None:
             return
         self._accept_event(EnterReview(active.operation_id))
-        self._accept_event(
-            ReviewAcknowledged(active.operation_id, event.value)
-        )
+        self._accept_event(ReviewAcknowledged(active.operation_id, event.value))
         if event.value:
             self._accept_event(
                 ConfirmationChanged(
@@ -298,60 +368,132 @@ class G502XTuiApp(App[None]):
             try:
                 self.query_one("#persistent-confirm", Input).focus()
             except NoMatches:
-                # The screen may be tearing down while a queued widget message
-                # is still draining. State already captured the acknowledgement.
                 return
 
     def _new_operation_id(self) -> OperationId:
-        # Treat the injected factory as a source of opaque display tokens only.
-        # A fresh process-local issuance prevents a reused factory object from
-        # aliasing a delayed callback or cancellation from an older operation.
         return OperationId(str(self._operation_id_factory()))
 
+    def _navigate_task(self, route: Route) -> None:
+        if self._layout_constrained() or self._model.active is not None:
+            return
+        self._accept_event(Navigate(route))
+
+    def _on_route(self, route: Route) -> bool:
+        return self._model.route is route and self._model.active is None
+
+    def action_configuration(self) -> None:
+        if self._model.route is Route.HOME:
+            self._navigate_task(Route.CONFIGURATION)
+
+    def action_backup_context(self) -> None:
+        if self._model.route is Route.HOME:
+            self._navigate_task(Route.BACKUP_RESTORE)
+        elif self._model.route is Route.BACKUP_RESTORE:
+            self.action_restore_backup()
+
+    def action_diagnostics(self) -> None:
+        if self._model.route is Route.HOME:
+            self._navigate_task(Route.DIAGNOSTICS)
+
     def action_probe(self) -> None:
-        self._request_operation(OperationAction.PROBE)
+        if self._on_route(Route.DIAGNOSTICS):
+            self._request_operation(OperationAction.PROBE)
 
     def action_refresh(self) -> None:
-        if self._layout_constrained():
+        if self._layout_constrained() or self._model.active is not None:
+            return
+        if self._model.route not in {
+            Route.HOME,
+            Route.CONFIGURATION,
+            Route.BACKUP_RESTORE,
+            Route.DIAGNOSTICS,
+        }:
             return
         self._accept_event(RefreshRequested(self._new_operation_id()))
 
     def action_validate(self) -> None:
-        self._request_operation(OperationAction.VALIDATE)
+        if self._on_route(Route.DIAGNOSTICS):
+            self._request_operation(OperationAction.VALIDATE)
 
     def action_plan(self) -> None:
-        self._request_operation(
-            OperationAction.PLAN, hardware_affecting=False
-        )
+        if self._on_route(Route.CONFIGURATION):
+            self._request_operation(
+                OperationAction.PLAN, hardware_affecting=False
+            )
 
     def action_apply(self) -> None:
-        self._request_operation(
-            OperationAction.PREPARE_PERSISTENT,
-            persistent_kind=PersistentOperationKind.APPLY_CONFIG,
-        )
+        if self._on_route(Route.CONFIGURATION):
+            self._request_operation(
+                OperationAction.PREPARE_PERSISTENT,
+                persistent_kind=PersistentOperationKind.APPLY_CONFIG,
+            )
 
     def action_restore_backup(self) -> None:
-        self._request_operation(
-            OperationAction.PREPARE_PERSISTENT,
-            persistent_kind=PersistentOperationKind.RESTORE_BACKUP,
-        )
+        if self._on_route(Route.BACKUP_RESTORE):
+            self._request_operation(
+                OperationAction.PREPARE_PERSISTENT,
+                persistent_kind=PersistentOperationKind.RESTORE_BACKUP,
+            )
 
     def action_restore_baseline(self) -> None:
-        self._request_operation(
-            OperationAction.PREPARE_PERSISTENT,
-            persistent_kind=PersistentOperationKind.RESTORE_BASELINE,
-        )
+        if self._on_route(Route.BACKUP_RESTORE):
+            self._request_operation(
+                OperationAction.PREPARE_PERSISTENT,
+                persistent_kind=PersistentOperationKind.RESTORE_BASELINE,
+            )
 
     def action_profile_switch(self) -> None:
-        self._request_operation(OperationAction.PROFILE_SWITCH)
+        if self._on_route(Route.CONFIGURATION):
+            self._request_operation(OperationAction.PROFILE_SWITCH)
 
     def action_report(self) -> None:
-        self._request_operation(OperationAction.REPORT)
+        if self._on_route(Route.DIAGNOSTICS):
+            self._request_operation(OperationAction.REPORT)
 
     def action_help(self) -> None:
         self._accept_event(SetHelp(not self._model.help_open))
 
+    def action_activate_focused(self) -> None:
+        """Preserve focused-control Enter semantics under the task shell."""
+        focused = self.focused
+        if (
+            focused is None
+            or getattr(focused, "disabled", False)
+            or not getattr(focused, "display", True)
+        ):
+            return
+
+        if isinstance(focused, Input):
+            input_id = focused.id
+            if input_id == "config-path":
+                self.action_plan()
+            elif input_id == "backup-path":
+                self.action_restore_backup()
+            elif input_id == "profile-confirmation":
+                self.action_profile_switch()
+            elif input_id == "persistent-confirm":
+                active = self._model.active
+                if active is not None:
+                    self._accept_event(
+                        ConfirmationSubmitted(active.operation_id)
+                    )
+            return
+
+        if isinstance(focused, Checkbox):
+            focused.toggle()
+            return
+
+        if isinstance(focused, Button):
+            focused.press()
+
+    def action_technical(self) -> None:
+        self._accept_event(
+            SetTechnicalDetails(not self._model.technical_open)
+        )
+
     def action_privacy(self) -> None:
+        if not self._on_route(Route.DIAGNOSTICS):
+            return
         current = self._model.surface_privacy
         if current is PrivacyClass.SHAREABLE:
             target = PrivacyClass.LOCAL_SENSITIVE
@@ -373,30 +515,29 @@ class G502XTuiApp(App[None]):
             self._accept_event(SetDisclosure(None))
 
     def action_cancel_or_back(self) -> None:
-        active = self._model.active
-        if active is not None:
-            self._accept_event(CancellationRequested(active.operation_id))
-            return
         if self._model.help_open:
             self._accept_event(SetHelp(False))
             return
-        self._model, _ = update(self._model, ChangePrivacySurface(PrivacyClass.SHAREABLE))
-        self._model, _ = update(self._model, SetHelp(False))
-        self._model, _ = update(self._model, SetDisclosure(None))
-        self._model = TuiModel(
-            surface_privacy=self._model.surface_privacy,
-            read_only=self._model.read_only,
-            read_only_reason=self._model.read_only_reason,
+        if self._model.active is not None:
+            self._accept_event(
+                CancellationRequested(self._model.active.operation_id)
+            )
+            return
+        if self._model.technical_open:
+            self._accept_event(SetTechnicalDetails(False))
+            return
+        if self._model.route is Route.HOME:
+            return
+        self._model, _ = update(
+            self._model, ChangePrivacySurface(PrivacyClass.SHAREABLE)
         )
+        self._model, _ = update(self._model, SetDisclosure(None))
+        self._model, _ = update(self._model, Navigate(Route.HOME))
         self._render()
 
     def action_safe_quit(self) -> None:
         active = self._model.active
-        if (
-            active is not None
-            and active.persistent_kind is not None
-            and active.execution_requested
-        ):
+        if active is not None:
             self._accept_event(CancellationRequested(active.operation_id))
             return
         self.exit()
@@ -408,7 +549,7 @@ class G502XTuiApp(App[None]):
         hardware_affecting: bool = True,
         persistent_kind: PersistentOperationKind | None = None,
     ) -> None:
-        if self._layout_constrained():
+        if self._layout_constrained() or self._model.active is not None:
             return
         if self._model.read_only and (
             action is OperationAction.PROFILE_SWITCH
@@ -438,17 +579,11 @@ class G502XTuiApp(App[None]):
             and active.cancellation_acknowledged
             and self._model.prepared is not None
         ):
-            # Preserve the Phase 4 acknowledgement semantics, then abandon the
-            # pre-execution preparation through ordinary model transitions.
-            # No Textual worker/thread cancellation is used as hardware authority.
             self._model, _ = update(
                 self._model,
                 ChangePrivacySurface(PrivacyClass.SHAREABLE),
             )
-            self._model, _ = update(
-                self._model,
-                Navigate(Route.HOME),
-            )
+            self._model, _ = update(self._model, Navigate(Route.HOME))
         current_active = self._model.active
         if previous_active is not None and (
             current_active is None
@@ -473,9 +608,45 @@ class G502XTuiApp(App[None]):
     def _layout_constrained(self) -> bool:
         if not self.is_mounted:
             return False
-        width = self.size.width
-        height = self.size.height
-        return width < self.MINIMUM_SIZE[0] or height < self.MINIMUM_SIZE[1]
+        return (
+            self.size.width < self.MINIMUM_SIZE[0]
+            or self.size.height < self.MINIMUM_SIZE[1]
+        )
+
+    def _constrained_text(self) -> str:
+        active = self._model.active
+        if active is None:
+            text = (
+                "G502 X Onboard\n\n"
+                "[X] Terminal is smaller than the supported 80x24 minimum.\n\n"
+                "Enlarge the terminal to use device and configuration actions.\n"
+                "No hardware action is available in this layout.\n\n"
+                "? Help   Q Exit"
+            )
+        elif active.non_cancellable or active.worker_fault_unresolved:
+            text = (
+                "G502 X Onboard\n\n"
+                "[>] Writing/verification is still in progress\n"
+                "[!] Cancellation is unavailable\n\n"
+                "Keep this process open. Enlarge the terminal for full detail.\n"
+                "No new hardware action is available.\n\n"
+                "? Help"
+            )
+        else:
+            text = (
+                "G502 X Onboard\n\n"
+                f"[>] {active.action.value.replace('-', ' ').title()} is still active\n"
+                "[ ] Persistent writing has not been reported as started.\n"
+                + (
+                    "Cooperative cancellation is available.\n"
+                    if active.cancellation_available
+                    else "Cooperative cancellation is unavailable.\n"
+                )
+                + "\nEnlarge the terminal for full detail.\n? Help   Esc Cancel/back"
+            )
+        if self._model.help_open:
+            text += "\n\n" + "\n".join(view(self._model).help_lines)
+        return text
 
     def _render(self) -> None:
         if not self.is_mounted:
@@ -485,41 +656,41 @@ class G502XTuiApp(App[None]):
             constrained_widget = self.query_one("#constrained", Static)
             main_widget = self.query_one("#main", Vertical)
         except NoMatches:
-            # A worker callback may arrive while Textual is tearing down the
-            # screen. State remains authoritative; rendering is simply over.
             return
+
+        constrained_widget.update(self._constrained_text())
         constrained_widget.display = constrained
         main_widget.display = not constrained
+        main_widget.set_class(self.size.width > 100, "expanded")
 
-        # Hidden widgets still mirror the privacy-filtered model. In particular,
-        # a downgrade to SHAREABLE must erase local/private values immediately
-        # even while the main layout is hidden by the minimum-size guard.
         vm = view(self._model)
         summary = [
+            f"G502 X Onboard — {vm.route_title}",
             f"Privacy: {vm.privacy_label}",
-            f"State: {'ACTIVE' if vm.operation_active else 'IDLE'}",
+            f"Read: {vm.read_truth.value}",
         ]
-        if vm.operation_action is not None:
-            summary.append(f"Operation: {vm.operation_action.value}")
-        if vm.persistent_kind is not None:
-            summary.append(f"Persistent: {vm.persistent_kind.value}")
-        if vm.phase_label:
-            summary.append(f"Phase: {vm.phase_label}")
-        if vm.read_only:
-            summary.append("READ ONLY")
+        if vm.operation_active:
+            summary.append("[>] foreground operation active")
+        elif vm.read_only:
+            summary.append("[!] READ ONLY")
         if os.environ.get("NO_COLOR") is not None:
-            summary.append("NO_COLOR: semantic labels active")
+            summary.append("NO_COLOR: text/markers carry semantic state")
         self.query_one("#summary", Static).update(" | ".join(summary))
 
+        task_route = self._model.route
+        panel_routes = {
+            "home-panel": Route.HOME,
+            "configuration-panel": Route.CONFIGURATION,
+            "backup-panel": Route.BACKUP_RESTORE,
+            "diagnostics-panel": Route.DIAGNOSTICS,
+        }
+        for panel_id, route in panel_routes.items():
+            self.query_one(f"#{panel_id}").display = (
+                not constrained and task_route is route and not vm.operation_active
+            )
+
         busy = vm.operation_active
-        read_only_mutation = vm.read_only
-        for button_id in (
-            "probe",
-            "refresh",
-            "validate",
-            "plan",
-            "report",
-        ):
+        for button_id in ("probe", "refresh", "validate", "plan", "report"):
             self.query_one(f"#{button_id}", Button).disabled = busy
         for button_id in (
             "apply",
@@ -528,8 +699,9 @@ class G502XTuiApp(App[None]):
             "profile-switch",
         ):
             self.query_one(f"#{button_id}", Button).disabled = (
-                busy or read_only_mutation
+                busy or vm.read_only
             )
+        self.query_one("#privacy", Button).disabled = busy
 
         self._syncing_widgets = True
         try:
@@ -555,7 +727,9 @@ class G502XTuiApp(App[None]):
             confirmation.disabled = not vm.confirmation_visible
             phrase = vm.required_confirmation_phrase or ""
             confirmation.placeholder = (
-                f"Type exactly: {phrase}" if phrase else "Exact persistent confirmation"
+                f"Type exactly: {phrase}"
+                if phrase
+                else "Exact persistent confirmation"
             )
             if confirmation.value != vm.confirmation_input:
                 confirmation.value = vm.confirmation_input
@@ -572,20 +746,17 @@ class G502XTuiApp(App[None]):
 
         detail: list[str] = []
         if vm.help_open:
-            detail.extend(
-                [
-                    "HELP — local presentation only; opening help performs zero facade/backend calls.",
-                    "Keys: p probe | r refresh/status | v validate | n plan | a apply",
-                    "b restore backup | l restore baseline | s profile | g public report",
-                    "h help | d privacy surface | Esc cooperative cancel/back | q or Ctrl+Q safe quit",
-                    "Paths are LOCAL SENSITIVE. Persistent writes always require prepare/review/exact confirmation.",
-                ]
-            )
+            detail.extend(vm.help_lines)
+        elif vm.technical_open:
+            detail.extend(vm.technical_lines)
+            if vm.disclosure_message:
+                detail.append(vm.disclosure_message)
+            if vm.detail and vm.privacy is PrivacyClass.PRIVATE_DIAGNOSTIC:
+                detail.append(f"PRIVATE detail: {vm.detail}")
         else:
-            if vm.safety_label:
+            detail.extend(vm.primary_lines)
+            if vm.safety_label and vm.safety_label not in detail:
                 detail.append(vm.safety_label)
-            if vm.read_only_label:
-                detail.append(vm.read_only_label)
             if vm.read_only_reason:
                 detail.append(f"Read-only reason: {vm.read_only_reason}")
             if vm.review_lines:
@@ -603,13 +774,9 @@ class G502XTuiApp(App[None]):
                     f"reconciliation_completed={str(vm.reconciliation_completed).lower()}; "
                     f"post_validation_completed={str(vm.post_validation_completed).lower()}"
                 )
-            if vm.error_code:
-                detail.append(f"Error code: {vm.error_code.value}")
-            if vm.message:
+            if vm.message and self._model.route is not Route.HOME:
                 detail.append(vm.message)
-            if vm.detail and vm.privacy is PrivacyClass.PRIVATE_DIAGNOSTIC:
-                detail.append(f"PRIVATE detail: {vm.detail}")
-            if vm.disclosure_message:
+            if vm.disclosure_message and vm.privacy is PrivacyClass.PRIVATE_DIAGNOSTIC:
                 detail.append(vm.disclosure_message)
             if not detail:
                 detail.append(

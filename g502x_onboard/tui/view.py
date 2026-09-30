@@ -14,6 +14,7 @@ from g502x_onboard.application.models import (
 )
 from .model import (
     OperationAction,
+    ReadTruth,
     Route,
     TerminalOutcome,
     TuiModel,
@@ -24,8 +25,14 @@ from .model import (
 @dataclass(frozen=True)
 class ViewModel:
     route: Route
+    route_title: str
     privacy: PrivacyClass
     privacy_label: str
+    read_truth: ReadTruth
+    primary_lines: tuple[str, ...]
+    help_lines: tuple[str, ...]
+    technical_open: bool
+    technical_lines: tuple[str, ...]
     read_only: bool
     read_only_label: str | None
     read_only_reason: str | None
@@ -70,6 +77,19 @@ def _privacy_label(value: PrivacyClass) -> str:
     if value is PrivacyClass.LOCAL_SENSITIVE:
         return "LOCAL SENSITIVE"
     return "PRIVATE"
+
+
+def _route_title(route: Route) -> str:
+    return {
+        Route.HOME: "Home",
+        Route.CONFIGURATION: "Configuration",
+        Route.BACKUP_RESTORE: "Backup & Restore",
+        Route.DIAGNOSTICS: "Diagnostics",
+        Route.OPERATION: "Active operation",
+        Route.REVIEW: "Review",
+        Route.CONFIRMATION: "Confirmation",
+        Route.RESULT: "Result",
+    }[route]
 
 
 def _review_lines(prepared: PreparedOperation | None) -> tuple[str, ...]:
@@ -120,6 +140,309 @@ def _review_lines(prepared: PreparedOperation | None) -> tuple[str, ...]:
     return tuple(common)
 
 
+def _profile_label(profile: int | None) -> str | None:
+    if profile is None:
+        return None
+    if profile == 1:
+        return "Profile 1 — SAFE"
+    return f"Profile {profile}"
+
+
+def _primary_lines(model: TuiModel) -> tuple[str, ...]:
+    if model.route is Route.HOME:
+        if model.read_truth is ReadTruth.NEVER_READ:
+            return (
+                "[ ] Device state not read yet",
+                "Read the current onboard state before making decisions from this screen.",
+                "Reading state does not modify the mouse.",
+                "R Read state   C Configuration   B Backup & Restore   D Diagnostics",
+            )
+        if model.read_truth is ReadTruth.READING:
+            return (
+                "[>] Reading current onboard state",
+                "Reading state does not modify the mouse.",
+                "No background polling is active.",
+            )
+        if model.read_truth is ReadTruth.READ_FAILED:
+            return (
+                "[X] Device state could not be read",
+                "The application could not obtain a usable device state from this read.",
+                "Check the connection and try again.",
+                "Open Help or Diagnostics for additional information available to this privacy surface.",
+                "R Try again   ? Help   Q Exit",
+            )
+        state = model.read_state
+        if state is None:
+            return (
+                "[X] Device state could not be read",
+                "Typed read state is unavailable. Refresh before making device-state decisions.",
+            )
+        device = state.device_name or "Supported device available"
+        lines = [f"[OK] {device}", "[OK] State read successfully"]
+        if model.read_only:
+            lines.append("[!] This device is read-only")
+        profile = _profile_label(state.active_profile)
+        if profile:
+            lines.append(f"Current profile     {profile}")
+        if state.enabled_profiles:
+            lines.append(
+                "Enabled profiles     " + ", ".join(map(str, state.enabled_profiles))
+            )
+        lines.extend(
+            [
+                "No operation is pending.",
+                "C Configuration   B Backup & Restore   D Diagnostics   R Refresh",
+            ]
+        )
+        return tuple(lines)
+
+    if model.route is Route.CONFIGURATION:
+        return (
+            "Configuration",
+            "Plan a local configuration, prepare an apply, or switch the active profile.",
+            "Apply keeps the existing Prepare -> Review -> Confirm -> execution authority.",
+            "Paths and user-authored configuration are LOCAL SENSITIVE.",
+            "N Plan   A Apply   S Switch profile   R Refresh   T Technical details",
+        )
+    if model.route is Route.BACKUP_RESTORE:
+        return (
+            "Backup & Restore",
+            "Restore an existing backup or the active validated baseline.",
+            "This area does not create a new manual backup operation.",
+            "B Restore backup   L Restore baseline   R Refresh   T Technical details",
+        )
+    if model.route is Route.DIAGNOSTICS:
+        return (
+            "Diagnostics",
+            "Read-oriented diagnostics and privacy-governed technical disclosure.",
+            "Opening this area performs zero hardware reads.",
+            "P Probe   V Validate   G Public report   R Refresh/status",
+        )
+
+    active = model.active
+    if model.route is Route.OPERATION and active is not None:
+        if active.action is OperationAction.REFRESH:
+            return (
+                "[>] Reading current onboard state",
+                "Reading state does not modify the mouse.",
+            )
+        if active.worker_fault_unresolved:
+            return (
+                "[!] HARDWARE OUTCOME UNKNOWN",
+                "Keep this process open. Do not retry while the outcome is unknown.",
+                "Cancellation is unavailable.",
+            )
+        if active.non_cancellable:
+            return (
+                "[>] Writing/verification is still in progress",
+                "[!] Cancellation is unavailable",
+                "Keep this process open until authoritative completion.",
+            )
+        return (
+            f"[>] {active.action.value.replace('-', ' ').title()} in progress",
+            (
+                "Cooperative cancellation is available."
+                if active.cancellation_available
+                else "Cooperative cancellation is unavailable."
+            ),
+        )
+
+    if model.route is Route.REVIEW:
+        return (
+            "[ ] Review the exact prepared operation",
+            "Preparation/review has not written persistent state.",
+        )
+    if model.route is Route.CONFIRMATION:
+        return (
+            "[ ] Exact confirmation required",
+            "Confirmation requests execution-time revalidation; it does not bypass safety checks.",
+        )
+    if model.route is Route.RESULT:
+        if model.terminal is not None and model.terminal.outcome is TerminalOutcome.SUCCESS:
+            return ("[DONE] Operation completed",)
+        if model.terminal is not None:
+            return ("[FAIL] Operation did not complete successfully",)
+        return ("Result",)
+    return ()
+
+
+def _read_truth_help_line(read_truth: ReadTruth) -> str:
+    return {
+        ReadTruth.NEVER_READ: "No physical state has been read in this session.",
+        ReadTruth.READING: "An explicit foreground device-state read is in progress.",
+        ReadTruth.READ_OK: "The last explicit device-state read succeeded; this is not live polling.",
+        ReadTruth.READ_FAILED: "The latest explicit device-state read failed; no more specific cause is inferred.",
+    }[read_truth]
+
+
+def _cancellation_help_line(active) -> str:
+    if active is None:
+        return "No cooperative cancellation is currently applicable."
+    return (
+        "Cooperative cancellation is currently available."
+        if active.cancellation_available
+        else "Cooperative cancellation is currently unavailable."
+    )
+
+
+def _help_lines(model: TuiModel) -> tuple[str, ...]:
+    active = model.active
+    read_text = _read_truth_help_line(model.read_truth)
+    if model.route is Route.HOME:
+        return (
+            "HELP — Home",
+            read_text,
+            "R explicitly reads current state and does not itself modify onboard state.",
+            "C opens Configuration; B opens Backup & Restore; D opens Diagnostics.",
+            "Writing has not started from Home.",
+            "No operation is cancellable from idle Home.",
+            "Q exits only when no foreground operation owns hardware state.",
+        )
+    if model.route is Route.CONFIGURATION:
+        return (
+            "HELP — Configuration",
+            read_text,
+            "Opening Configuration does not write persistent state.",
+            "Plan is local/read-only with respect to hardware.",
+            "Apply uses Prepare -> Review -> Confirm -> execution-time revalidation.",
+            "Profile switch remains a volatile mutation with its exact confirmation phrase.",
+            "No hidden refresh occurs when this area opens.",
+            "No cooperative cancellation is currently applicable while Configuration is idle.",
+        )
+    if model.route is Route.BACKUP_RESTORE:
+        return (
+            "HELP — Backup & Restore",
+            read_text,
+            "Only existing Restore backup and Restore baseline operations are exposed.",
+            "Backup paths are LOCAL SENSITIVE.",
+            "Nothing is written merely by opening this area.",
+            "No cooperative cancellation is currently applicable while Backup & Restore is idle.",
+        )
+    if model.route is Route.DIAGNOSTICS:
+        return (
+            "HELP — Diagnostics",
+            read_text,
+            "Opening Diagnostics or Help writes nothing and performs zero hardware calls.",
+            "Probe, Validate, Refresh/status and Public report run only when explicitly invoked.",
+            "SHAREABLE, LOCAL SENSITIVE and PRIVATE remain distinct privacy surfaces.",
+            "Technical details are local presentation, not a facade operation.",
+            "No cooperative cancellation is currently applicable while Diagnostics is idle.",
+        )
+    if model.route is Route.REVIEW:
+        return (
+            "HELP — Review",
+            "This is an immutable prepared intent; preparation/review has not written persistent state.",
+            "Acknowledge the exact review before confirmation.",
+            _cancellation_help_line(active),
+            "Esc requests cancellation/abandonment only where current application authority allows it.",
+        )
+    if model.route is Route.CONFIRMATION:
+        return (
+            "HELP — Confirmation",
+            "Nothing has been written yet.",
+            "Type exactly the application-supplied phrase; surrounding-whitespace handling is unchanged.",
+            "Confirmation triggers execution-time revalidation rather than bypassing safety checks.",
+            _cancellation_help_line(active),
+            "Esc requests cancellation before write only where current authority allows it.",
+        )
+    if model.route is Route.OPERATION and active is not None:
+        if active.non_cancellable or active.worker_fault_unresolved:
+            return (
+                "HELP — Active operation",
+                "Persistent writing or verification has begun or may have begun.",
+                "Cooperative cancellation is unavailable.",
+                "Q/Esc do not terminate the active transaction or fabricate cancellation.",
+                "An unresolved hardware outcome is not a terminal result.",
+                "Keep this process open; await authoritative reconciliation/completion and do not retry an unresolved outcome.",
+            )
+        return (
+            "HELP — Active operation",
+            "A foreground operation owns hardware-operation precedence.",
+            "Persistent writing has not been reported as started.",
+            "No second hardware operation or Refresh may start.",
+            _cancellation_help_line(active),
+        )
+    if model.route is Route.RESULT:
+        lines = [
+            "HELP — Result",
+            "Review the authoritative result and its privacy-safe primary message.",
+        ]
+        if model.terminal is not None:
+            lines.extend(
+                [
+                    "Persistent writing started: "
+                    + ("Yes." if model.terminal.writing_started else "No."),
+                    "Readback reconciliation completed: "
+                    + ("Yes." if model.terminal.reconciliation_completed else "No."),
+                    "Post-write validation completed: "
+                    + ("Yes." if model.terminal.post_validation_completed else "No."),
+                    "Cooperative cancellation is no longer applicable because the operation is terminal.",
+                ]
+            )
+        else:
+            lines.append("No cooperative cancellation is currently applicable.")
+        lines.extend(
+            [
+                "T opens permitted Technical details.",
+                "Esc returns to Home.",
+            ]
+        )
+        return tuple(lines)
+    return (
+        "HELP",
+        read_text,
+        "No cooperative cancellation is currently applicable.",
+    )
+
+def _technical_lines(
+    model: TuiModel,
+    *,
+    error_code: ErrorCode | None,
+) -> tuple[str, ...]:
+    lines = [
+        "TECHNICAL DETAILS",
+        f"Privacy: {_privacy_label(model.surface_privacy)}",
+        f"Route: {model.route.value}",
+        f"Read truth: {model.read_truth.value}",
+    ]
+    if model.read_state is not None:
+        lines.append(f"Read source: {model.read_state.source.value}")
+        lines.append(f"Active profile: {model.read_state.active_profile}")
+        lines.append(
+            "Enabled profiles: "
+            + (", ".join(map(str, model.read_state.enabled_profiles)) or "none")
+        )
+    if model.probe_state is not None:
+        lines.append(
+            f"Last typed probe device: {model.probe_state.device_name or 'not supplied'}"
+        )
+        lines.append(f"Probe read-only: {model.probe_state.read_only}")
+    if model.active is not None:
+        lines.append(f"Operation id: {model.active.operation_id}")
+        lines.append(f"Action: {model.active.action.value}")
+        if model.active.persistent_kind is not None:
+            lines.append(f"Persistent kind: {model.active.persistent_kind.value}")
+        if model.active.phase is not None:
+            lines.append(f"Phase: {model.active.phase.value}")
+        lines.append(
+            f"Cancellation available: {model.active.cancellation_available}"
+        )
+    if error_code is not None:
+        lines.append(f"Error code: {error_code.value}")
+    if model.terminal is not None:
+        lines.extend(
+            [
+                f"Terminal outcome: {model.terminal.outcome.value}",
+                f"writing_started={str(model.terminal.writing_started).lower()}",
+                "reconciliation_completed="
+                + str(model.terminal.reconciliation_completed).lower(),
+                "post_validation_completed="
+                + str(model.terminal.post_validation_completed).lower(),
+            ]
+        )
+    return tuple(lines)
+
+
 def view(model: TuiModel) -> ViewModel:
     active = model.active
     phase = active.phase if active is not None else (
@@ -150,17 +473,13 @@ def view(model: TuiModel) -> ViewModel:
     transient_notice = (
         model.transient_notice
         if model.transient_notice is not None
-        and privacy_allows(
-            model.surface_privacy, model.transient_notice.privacy
-        )
+        and privacy_allows(model.surface_privacy, model.transient_notice.privacy)
         else None
     )
     read_only_reason = (
         model.read_only_reason
         if model.read_only_reason is not None
-        and privacy_allows(
-            model.surface_privacy, model.read_only_reason.privacy
-        )
+        and privacy_allows(model.surface_privacy, model.read_only_reason.privacy)
         else None
     )
     disclosure = (
@@ -220,14 +539,18 @@ def view(model: TuiModel) -> ViewModel:
 
     return ViewModel(
         route=model.route,
+        route_title=_route_title(model.route),
         privacy=model.surface_privacy,
         privacy_label=_privacy_label(model.surface_privacy),
+        read_truth=model.read_truth,
+        primary_lines=_primary_lines(model),
+        help_lines=_help_lines(model),
+        technical_open=model.technical_open,
+        technical_lines=_technical_lines(model, error_code=error_code),
         read_only=model.read_only,
         read_only_label=("READ ONLY" if model.read_only else None),
         read_only_reason=(
-            read_only_reason.message
-            if read_only_reason is not None
-            else None
+            read_only_reason.message if read_only_reason is not None else None
         ),
         operation_active=active is not None,
         operation_id=(str(active.operation_id) if active is not None else None),

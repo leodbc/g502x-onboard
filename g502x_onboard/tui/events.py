@@ -10,7 +10,14 @@ from g502x_onboard.application.models import (
     PreparedOperation,
     PrivacyClass,
 )
-from .model import FocusIntent, OperationAction, OperationId, PresentationPayload, Route
+from .model import (
+    FocusIntent,
+    OperationAction,
+    OperationId,
+    PresentationPayload,
+    ReadProjection,
+    Route,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +34,11 @@ class SetHelp:
 @dataclass(frozen=True)
 class SetDisclosure:
     payload: PresentationPayload | None
+
+
+@dataclass(frozen=True)
+class SetTechnicalDetails:
+    open: bool
 
 
 @dataclass(frozen=True)
@@ -112,6 +124,7 @@ class ApplicationCompleted:
     operation_id: OperationId
     message: str
     privacy: PrivacyClass = PrivacyClass.SHAREABLE
+    read_projection: ReadProjection | None = None
 
 
 @dataclass(frozen=True)

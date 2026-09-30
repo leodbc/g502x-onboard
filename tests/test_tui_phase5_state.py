@@ -35,7 +35,12 @@ from g502x_onboard.tui.events import (
     ReviewAcknowledged,
     WorkerTransportFault,
 )
-from g502x_onboard.tui.model import OperationAction, OperationId, TuiModel
+from g502x_onboard.tui.model import (
+    OperationAction,
+    OperationId,
+    ReadTruth,
+    TuiModel,
+)
 from g502x_onboard.tui.update import update
 from g502x_onboard.tui.view import view
 
@@ -171,6 +176,7 @@ class Phase5StateTests(unittest.TestCase):
         model, effects = update(TuiModel(), RefreshRequested(op))
         self.assertEqual(effects, (RequestExplicitRefresh(op),))
         self.assertIs(model.active.action, OperationAction.REFRESH)
+        self.assertIs(model.read_truth, ReadTruth.READING)
 
     def test_writing_fault_remains_active_unresolved_without_terminal_truth(self):
         for phase in (

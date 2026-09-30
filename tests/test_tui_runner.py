@@ -29,7 +29,7 @@ from g502x_onboard.tui.events import (
     PersistentProgress,
     WorkerTransportFault,
 )
-from g502x_onboard.tui.model import OperationId
+from g502x_onboard.tui.model import OperationAction, OperationId, ReadProjection
 from g502x_onboard.tui.runner import EffectRunner
 
 
@@ -127,10 +127,85 @@ class EffectRunnerTests(unittest.TestCase):
 
         self.assertTrue(runner.run(effect))
         self.assertEqual(facade.calls, [("status", False)])
-        self.assertEqual(sum(isinstance(e, ApplicationCompleted) for e in emitted), 1)
+        completed = [e for e in emitted if isinstance(e, ApplicationCompleted)]
+        self.assertEqual(len(completed), 1)
+        projection = completed[0].read_projection
+        self.assertIsInstance(projection, ReadProjection)
+        self.assertIs(projection.source, OperationAction.REFRESH)
+        self.assertEqual(projection.active_profile, 1)
+        self.assertEqual(projection.enabled_profiles, (1, 2))
+        self.assertIsNone(projection.device_name)
+        self.assertIsNone(projection.read_only)
+        self.assertFalse(hasattr(projection, "descriptor"))
+        self.assertFalse(hasattr(projection, "summary"))
 
         self.assertFalse(runner.run(effect))
         self.assertEqual(facade.calls, [("status", False)])
+
+
+    def test_probe_forwards_only_existing_typed_shareable_scalars(self):
+        class ProbeFacade:
+            def __init__(self):
+                self.calls = []
+
+            def probe(self):
+                self.calls.append(("probe",))
+                compatibility = CompatibilityObservation(
+                    architecture="compatible",
+                    transport="tested",
+                    identity="stable",
+                    write_allowed=False,
+                    eligibility=WriteEligibility.READ_ONLY,
+                )
+                from g502x_onboard.application.models import ProbeSnapshot
+                value = ProbeSnapshot(
+                    device_name="G502 X LIGHTSPEED",
+                    protocol="HID++ 2.0",
+                    active_profile=1,
+                    compatibility=compatibility,
+                )
+                return OperationResult(
+                    ok=True, value=value, privacy=value.privacy
+                )
+
+        from g502x_onboard.tui.effects import StartForegroundOperation
+        emitted = []
+        facade = ProbeFacade()
+        runner = EffectRunner(facade, emitted.append)
+        runner.run(
+            StartForegroundOperation(
+                OperationId("op-12121212"), OperationAction.PROBE
+            )
+        )
+        self.assertEqual(facade.calls, [("probe",)])
+        completed = [e for e in emitted if isinstance(e, ApplicationCompleted)]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(
+            completed[0].read_projection,
+            ReadProjection(
+                source=OperationAction.PROBE,
+                device_name="G502 X LIGHTSPEED",
+                active_profile=1,
+                read_only=True,
+            ),
+        )
+
+    def test_read_projection_schema_cannot_retain_raw_status_dicts(self):
+        names = set(ReadProjection.__dataclass_fields__)
+        self.assertEqual(
+            names,
+            {
+                "source",
+                "device_name",
+                "active_profile",
+                "enabled_profiles",
+                "read_only",
+                "privacy",
+            },
+        )
+        self.assertTrue(
+            names.isdisjoint({"descriptor", "summary", "detail", "payload"})
+        )
 
     def test_pending_cancellation_is_bound_to_exact_execution_token(self):
         emitted = []

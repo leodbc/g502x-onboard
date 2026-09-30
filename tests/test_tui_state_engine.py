@@ -50,6 +50,8 @@ from g502x_onboard.tui.model import (
     OperationAction,
     OperationId,
     PresentationPayload,
+    ReadProjection,
+    ReadTruth,
     Route,
     TerminalOutcome,
     TuiModel,
@@ -184,6 +186,130 @@ class TuiStateEngineTests(unittest.TestCase):
         self.assertIsNone(model.prepared)
         self.assertEqual(model.confirmation_input, "")
         self.assertFalse(model.review_acknowledged)
+        self.assertIs(model.read_truth, ReadTruth.NEVER_READ)
+        self.assertIsNone(model.read_state)
+
+
+    def test_refresh_typed_state_drives_home_without_parsing_message(self):
+        model, effects = update(TuiModel(), RefreshRequested(self.op))
+        self.assertIs(model.read_truth, ReadTruth.READING)
+        self.assertIsNone(model.read_state)
+        self.assertEqual(effects, (RequestExplicitRefresh(self.op),))
+        projection = ReadProjection(
+            source=OperationAction.REFRESH,
+            active_profile=1,
+            enabled_profiles=(1, 2),
+        )
+        model, effects = update(
+            model,
+            ApplicationCompleted(
+                self.op,
+                "THIS STRING MUST NOT BE PARSED active_profile=5",
+                PrivacyClass.SHAREABLE,
+                projection,
+            ),
+        )
+        self.assertEqual(effects, ())
+        self.assertIs(model.read_truth, ReadTruth.READ_OK)
+        self.assertEqual(model.read_state, projection)
+        self.assertEqual(model.route, Route.HOME)
+        self.assertIsNone(model.active)
+        self.assertIsNone(model.terminal)
+        primary = "\n".join(view(model).primary_lines)
+        self.assertIn("[OK] Supported device available", primary)
+        self.assertIn("Profile 1", primary)
+        self.assertNotIn("Profile 5", primary)
+
+    def test_latest_failed_refresh_clears_stale_primary_read_and_is_cause_neutral(self):
+        model, _ = update(TuiModel(), RefreshRequested(self.op))
+        model, _ = update(
+            model,
+            ApplicationCompleted(
+                self.op,
+                "status complete",
+                PrivacyClass.SHAREABLE,
+                ReadProjection(
+                    source=OperationAction.REFRESH,
+                    active_profile=1,
+                    enabled_profiles=(1, 2),
+                ),
+            ),
+        )
+        self.assertIs(model.read_truth, ReadTruth.READ_OK)
+        model, _ = update(model, RefreshRequested(self.other))
+        self.assertIs(model.read_truth, ReadTruth.READING)
+        self.assertIsNone(model.read_state)
+        error = ApplicationError(
+            ErrorCode.BACKEND_FAILURE,
+            "status failed",
+            PrivacyClass.PRIVATE_DIAGNOSTIC,
+            detail="G HUB SECRET transport firmware",
+        )
+        model, effects = update(model, ApplicationFailed(self.other, error))
+        self.assertEqual(effects, ())
+        self.assertIs(model.read_truth, ReadTruth.READ_FAILED)
+        self.assertIsNone(model.read_state)
+        self.assertEqual(model.route, Route.HOME)
+        primary = "\n".join(view(model).primary_lines)
+        self.assertIn("Device state could not be read", primary)
+        self.assertNotIn("G HUB", primary)
+        self.assertNotIn("transport", primary.lower())
+        self.assertIsNone(model.last_error)
+
+    def test_refresh_completion_without_typed_projection_fails_closed(self):
+        model, _ = update(TuiModel(), RefreshRequested(self.op))
+        model, effects = update(
+            model,
+            ApplicationCompleted(
+                self.op,
+                "active_profile=1",
+                PrivacyClass.SHAREABLE,
+            ),
+        )
+        self.assertEqual(effects, ())
+        self.assertIs(model.read_truth, ReadTruth.READ_FAILED)
+        self.assertIsNone(model.read_state)
+        self.assertEqual(model.route, Route.HOME)
+        self.assertEqual(
+            model.terminal.error_code, ErrorCode.BACKEND_FAILURE
+        )
+
+    def test_probe_projection_is_diagnostic_and_does_not_upgrade_home_read_truth(self):
+        model, _ = update(
+            TuiModel(),
+            OperationRequested(self.op, OperationAction.PROBE),
+        )
+        projection = ReadProjection(
+            source=OperationAction.PROBE,
+            device_name="G502 X LIGHTSPEED",
+            active_profile=1,
+            read_only=True,
+        )
+        model, _ = update(
+            model,
+            ApplicationCompleted(
+                self.op,
+                "probe human string",
+                PrivacyClass.SHAREABLE,
+                projection,
+            ),
+        )
+        self.assertIs(model.read_truth, ReadTruth.NEVER_READ)
+        self.assertEqual(model.probe_state, projection)
+
+    def test_task_navigation_is_local_and_blocked_by_active_operation(self):
+        model, effects = update(
+            TuiModel(), Navigate(Route.CONFIGURATION)
+        )
+        self.assertEqual(effects, ())
+        self.assertEqual(model.route, Route.CONFIGURATION)
+        active, _ = update(
+            model,
+            OperationRequested(self.op, OperationAction.PLAN, hardware_affecting=False),
+        )
+        after, effects = update(active, Navigate(Route.DIAGNOSTICS))
+        self.assertEqual(after, active)
+        self.assertEqual(effects, ())
 
     def test_operation_id_is_short_opaque_token(self):
         self.assertEqual(
