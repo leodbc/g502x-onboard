@@ -731,7 +731,13 @@ class G502XTuiApp(App[None]):
                 if phrase
                 else "Exact persistent confirmation"
             )
-            if confirmation.value != vm.confirmation_input:
+            if (
+                confirmation.value != vm.confirmation_input
+                and (
+                    not confirmation.has_focus
+                    or not vm.confirmation_visible
+                )
+            ):
                 confirmation.value = vm.confirmation_input
 
             execute = self.query_one("#execute", Button)
