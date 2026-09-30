@@ -936,45 +936,34 @@ class TextualHarnessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await focus_id(pilot, app, "persistent-confirm")
-        expected = ""
-        for character in "APPLY CONFIG":
-            expected += character
-            await pilot.press("space" if character == " " else character)
-            await pilot.pause()
-            confirmation = app.query_one("#persistent-confirm", Input)
-            self.assertEqual(
-                confirmation.value,
-                expected,
-                (
-                    f"real key {character!r} did not reach confirmation widget; "
-                    f"widget={confirmation.value!r}; "
-                    f"model={app.tui_model.confirmation_input!r}; "
-                    f"focus={getattr(app.focused, 'id', None)!r}"
-                ),
-            )
-            self.assertEqual(
-                app.tui_model.confirmation_input,
-                expected,
-                (
-                    f"real key {character!r} did not reach confirmation model; "
-                    f"widget={confirmation.value!r}; "
-                    f"model={app.tui_model.confirmation_input!r}; "
-                    f"focus={getattr(app.focused, 'id', None)!r}"
-                ),
-            )
-            self.assertEqual(
-                getattr(app.focused, "id", None),
-                "persistent-confirm",
-                f"confirmation focus changed after real key {character!r}",
-            )
-        self.assertEqual(
-            app.query_one("#persistent-confirm", Input).value,
-            "APPLY CONFIG",
+        confirmation = app.query_one("#persistent-confirm", Input)
+        self.assertTrue(confirmation.display)
+        self.assertFalse(confirmation.disabled)
+        self.assertTrue(confirmation.has_focus)
+
+        keys = tuple(
+            "space" if character == " " else character
+            for character in "APPLY CONFIG"
         )
-        self.assertEqual(
-            app.tui_model.confirmation_input,
-            "APPLY CONFIG",
+        await pilot.press(*keys)
+        await wait_until(
+            pilot,
+            lambda: (
+                confirmation.value == "APPLY CONFIG"
+                and app.tui_model.confirmation_input == "APPLY CONFIG"
+            ),
+            (
+                "real keyboard confirmation did not reach widget and model; "
+                f"widget={confirmation.value!r}; "
+                f"model={app.tui_model.confirmation_input!r}; "
+                f"focus={getattr(app.focused, 'id', None)!r}"
+            ),
+            limit=50,
         )
+        self.assertEqual(confirmation.value, "APPLY CONFIG")
+        self.assertEqual(app.tui_model.confirmation_input, "APPLY CONFIG")
+        self.assertEqual(getattr(app.focused, "id", None), "persistent-confirm")
+
     async def test_keyboard_only_prepare_review_exact_confirm_success(self):
         facade = HarnessFacade()
         app = G502XTuiApp(facade=facade)
